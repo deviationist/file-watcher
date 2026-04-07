@@ -1,0 +1,21 @@
+{
+  "name": "file-watcher",
+  "version": "1.0.0",
+  "description": "Watch folders for file changes and run a configurable command",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/watcher.ts",
+    "build": "tsc",
+    "start": "node dist/watcher.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.0",
+    "commander": "^14.0.3",
+    "dotenv": "^16.0.0"
+  }
+}
