@@ -1,0 +1,17 @@
+[Unit]
+Description=File Watcher — run command on file changes
+After=network-online.target mnt-Resilio.mount
+Wants=network-online.target
+Requires=mnt-Resilio.mount
+
+[Service]
+Type=simple
+User=trym
+WorkingDirectory=/home/trym/code/file-watcher
+EnvironmentFile=/home/trym/code/file-watcher/.env
+ExecStart=/usr/bin/node /home/trym/code/file-watcher/dist/watcher.js
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
