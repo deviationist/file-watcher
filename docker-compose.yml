@@ -1,0 +1,8 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto
+    container_name: file-watcher-mosquitto
+    ports:
+      - "1883:1883"
+    command: mosquitto -c /mosquitto-no-auth.conf
+    restart: unless-stopped

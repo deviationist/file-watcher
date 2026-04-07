@@ -4,18 +4,28 @@
   "description": "Watch folders for file changes and run a configurable command",
   "type": "module",
   "scripts": {
+    "dev:publisher": "tsx watch src/publisher.ts",
+    "dev:subscriber": "tsx watch src/subscriber.ts",
+    "dev:all": "concurrently -k -n pub,sub -c blue,green \"npm run dev:publisher\" \"npm run dev:subscriber\"",
     "dev": "tsx watch src/watcher.ts",
     "build": "tsc",
-    "start": "node dist/watcher.js"
+    "start:publisher": "node dist/publisher.js",
+    "start:subscriber": "node dist/subscriber.js",
+    "start": "node dist/watcher.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "concurrently": "^9.2.1",
     "tsx": "^4.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.3"
   },
   "dependencies": {
     "chokidar": "^4.0.0",
     "commander": "^14.0.3",
-    "dotenv": "^16.0.0"
+    "dotenv": "^16.0.0",
+    "mqtt": "^5.15.1"
   }
 }
