@@ -1,54 +1,81 @@
 # file-watcher
 
-Generic file-system watcher daemon that monitors folders for changes and runs a configurable shell command after a debounce period. Designed for CIFS/NAS mounts where inotify doesn't work.
+Generic file-system watcher using MQTT pub/sub. A publisher watches folders for changes and emits events to an MQTT broker. Subscribers independently filter, debounce, and run commands in response. Designed for CIFS/NAS mounts where inotify doesn't work.
+
+## Architecture
+
+```
+chokidar (polling) → publisher → MQTT broker (Mosquitto)
+                                       │
+                          ┌─────────────┼─────────────┐
+                          ▼             ▼             ▼
+                    subscriber 1   subscriber 2   subscriber N
+```
 
 ## Tech stack
 
 - Node.js + TypeScript (strict, ESM)
 - chokidar (poll mode for CIFS compatibility)
-- dotenv for config
+- MQTT via `mqtt` package (QoS 1)
+- commander for CLI args
+- dotenv for env fallback config
 - tsx for dev, compiled JS for production
 
 ## Project structure
 
 ```
-src/watcher.ts       — main daemon (single file)
+src/shared.ts        — shared logging, types, CLI helpers
+src/publisher.ts     — watches filesystem, publishes events to MQTT
+src/subscriber.ts    — subscribes to MQTT, debounces, runs command
+src/watcher.ts       — legacy standalone daemon (pre-MQTT)
 .env                 — runtime config (gitignored)
 .env.example         — documented config template
-file-watcher.service — systemd unit file (references /home/trym/)
 ```
 
 ## Commands
 
 ```bash
-npm run dev          # run with tsx watch (auto-reload)
-npm run build        # compile to dist/
-npm run start        # run compiled JS
+npm run dev:publisher    # run publisher with tsx watch
+npm run dev:subscriber   # run subscriber with tsx watch
+npm run build            # compile to dist/
+npm run start:publisher  # run compiled publisher
+npm run start:subscriber # run compiled subscriber
 ```
 
 ## Configuration
 
-All config is via environment variables (see `.env.example`):
+All config is via CLI args with env var fallback (CLI takes precedence). See `.env.example`.
+
+### Publisher
 - `WATCH_FOLDERS` — comma-separated paths to watch (required)
 - `WATCH_EXTENSIONS` — comma-separated extensions without dots
 - `WATCH_EVENTS` — chokidar events to listen for
-- `DEBOUNCE_SECONDS` — quiet period before firing command
 - `POLL_INTERVAL_SECONDS` — chokidar polling interval (>= 5 for CIFS)
-- `ON_CHANGE_COMMAND` — shell command to execute (required)
+- `MQTT_BROKER_URL` — MQTT broker connection URL (required)
+- `MQTT_TOPIC` — topic to publish to (default: `file-watcher/change`)
+
+### Subscriber
+- `MQTT_BROKER_URL` — MQTT broker connection URL (required)
+- `MQTT_TOPIC` — topic to subscribe to (default: `file-watcher/change`)
+- `PATH_PREFIXES` — comma-separated path prefixes to filter on
+- `DEBOUNCE_SECONDS` — quiet period before firing command
+- `ON_CHANGE_COMMAND` — shell command to execute (required, receives `CHANGED_PATHS` env var)
+
+### MQTT message format
+
+```json
+{ "event": "add|change|unlink", "path": "/absolute/path", "timestamp": "ISO-8601" }
+```
 
 ## Key design decisions
 
 - Uses polling (`usePolling: true`) because CIFS mounts don't support inotify
 - `awaitWriteFinish` with 2s stability threshold to handle slow file copies
-- Single debounce timer resets on every matching event — only fires once after activity settles
-- The watcher is fully agnostic — it has no knowledge of what the command does
+- Publisher emits immediately (no debounce) — subscribers own their debounce
+- Subscriber passes `CHANGED_PATHS` (newline-separated) as env var to the command
+- Path deduplication via Set — same file changing multiple times = one entry
+- The system is fully agnostic — no knowledge of what subscribers do with events
 
 ## Deployment
 
-The systemd unit file targets the `trym` user and machine. Adjust `mnt-Resilio.mount` to match the actual CIFS mount unit name.
-
-```bash
-sudo cp file-watcher.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now file-watcher
-```
+The publisher and each subscriber run as separate systemd services. The MQTT broker (Mosquitto) runs as a Docker container.
