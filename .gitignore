@@ -3,3 +3,4 @@ dist/
 .env
 .claude/
 systemd/
+scripts/plex-refresh.ts
