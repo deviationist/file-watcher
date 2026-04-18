@@ -22,6 +22,8 @@ program
   .option("--use-polling <bool>", "use polling mode (required for CIFS/NAS, default: true)")
   .option("-b, --mqtt-broker-url <url>", "MQTT broker URL (e.g. mqtt://localhost:1883)")
   .option("-t, --mqtt-topic <topic>", "MQTT topic to publish to")
+  .option("-u, --mqtt-username <user>", "MQTT username (optional)")
+  .option("--mqtt-password <pass>", "MQTT password (optional)")
   .parse();
 
 const opts = program.opts<{
@@ -32,6 +34,8 @@ const opts = program.opts<{
   usePolling?: string;
   mqttBrokerUrl?: string;
   mqttTopic?: string;
+  mqttUsername?: string;
+  mqttPassword?: string;
 }>();
 
 // ---------------------------------------------------------------------------
@@ -46,6 +50,8 @@ interface PublisherConfig {
   usePolling: boolean;
   mqttBrokerUrl: string;
   mqttTopic: string;
+  mqttUsername?: string;
+  mqttPassword?: string;
 }
 
 function loadConfig(): PublisherConfig {
@@ -88,6 +94,9 @@ function loadConfig(): PublisherConfig {
     ?? process.env["MQTT_TOPIC"]?.trim()
     ?? "file-watcher/change";
 
+  const mqttUsername = opts.mqttUsername ?? process.env["MQTT_USERNAME"]?.trim() ?? undefined;
+  const mqttPassword = opts.mqttPassword ?? process.env["MQTT_PASSWORD"] ?? undefined;
+
   return {
     watchFolders,
     watchExtensions,
@@ -96,6 +105,8 @@ function loadConfig(): PublisherConfig {
     usePolling,
     mqttBrokerUrl,
     mqttTopic,
+    mqttUsername,
+    mqttPassword,
   };
 }
 
@@ -124,13 +135,24 @@ async function main(): Promise<void> {
   log(LABEL, `  POLL_INTERVAL_SECONDS: ${config.pollIntervalSeconds}`);
   log(LABEL, `  MQTT_BROKER_URL:       ${config.mqttBrokerUrl}`);
   log(LABEL, `  MQTT_TOPIC:            ${config.mqttTopic}`);
+  log(LABEL, `  MQTT_USERNAME:         ${config.mqttUsername ?? "(none)"}`);
 
-  // Connect to MQTT broker
-  const client: MqttClient = await mqtt.connectAsync(config.mqttBrokerUrl);
+  // Connect to MQTT broker (auto-reconnects every reconnectPeriod ms on failure)
+  const client: MqttClient = await mqtt.connectAsync(config.mqttBrokerUrl, {
+    username: config.mqttUsername,
+    password: config.mqttPassword,
+    reconnectPeriod: 2000,
+  });
   log(LABEL, "Connected to MQTT broker");
 
-  client.on("reconnect", () => log(LABEL, "Reconnecting to MQTT broker..."));
-  client.on("error", (err) => logError(LABEL, `MQTT error: ${err.message}`));
+  client.on("connect", () => log(LABEL, "Reconnected to MQTT broker"));
+  client.on("offline", () => log(LABEL, "Offline — broker unreachable, will retry"));
+  client.on("error", (err) => {
+    // ECONNREFUSED is expected when broker is restarting; suppress the spam
+    if ((err as NodeJS.ErrnoException).code !== "ECONNREFUSED") {
+      logError(LABEL, `MQTT error: ${err.message}`);
+    }
+  });
 
   // Handle file events
   function handleEvent(event: string, filePath: string): void {
