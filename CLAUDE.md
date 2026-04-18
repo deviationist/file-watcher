@@ -28,12 +28,11 @@ src/shared.ts             — shared logging, types, CLI helpers
 src/publisher.ts          — watches filesystem, publishes events to MQTT
 src/subscriber.ts         — subscribes to MQTT, debounces, runs command
 src/watcher.ts            — legacy standalone daemon (pre-MQTT)
-mosquitto/config/         — Mosquitto broker config
-mosquitto/config/passwd   — MQTT user credentials (gitignored)
-docker-compose.yml        — runs Mosquitto (MQTT 1883, HTTP dashboard 9883)
 .env                      — runtime config (gitignored)
 .env.example              — documented config template
 ```
+
+The MQTT broker (Mosquitto) and web client (MQTTX Web) live in `~/docker-config/mqtt/` as shared infrastructure — not in this project.
 
 ## Commands
 
@@ -75,26 +74,16 @@ All config is via CLI args with env var fallback (CLI takes precedence). See `.e
 ## Key design decisions
 
 - Uses polling (`usePolling: true`) because CIFS mounts don't support inotify
-- `awaitWriteFinish` with 2s stability threshold to handle slow file copies
+- `awaitWriteFinish` with configurable `stabilityThreshold` (default 60s) so slow CIFS copies generate one event, not many
 - Publisher emits immediately (no debounce) — subscribers own their debounce
 - Subscriber passes `CHANGED_PATHS` (newline-separated) as env var to the command
 - Path deduplication via Set — same file changing multiple times = one entry
 - The system is fully agnostic — no knowledge of what subscribers do with events
 - Publisher + subscriber auto-reconnect to the broker (2s retry) and the subscriber re-subscribes on each reconnect, so broker restarts are non-fatal
 
-## Broker setup
+## Broker
 
-Mosquitto runs via `docker compose up -d`. Config lives in `mosquitto/config/`:
-- `mosquitto.conf` — MQTT listener on 1883 requires auth; HTTP dashboard on 9883 is anonymous (intended to sit behind an auth reverse proxy like Nginx+Authelia)
-- `passwd` — generated via `mosquitto_passwd` inside the container, gitignored. Must be readable by UID 1883 (mosquitto user).
-
-Generate a password file:
-```bash
-docker run --rm -v $(pwd)/mosquitto/config:/mosquitto/config eclipse-mosquitto \
-  mosquitto_passwd -b -c /mosquitto/config/passwd <username> <password>
-sudo chown 1883:1883 mosquitto/config/passwd
-sudo chmod 640 mosquitto/config/passwd
-```
+Mosquitto + MQTTX Web live in `~/docker-config/mqtt/` (not in this repo). Connection details are in `.env` (`MQTT_BROKER_URL`, `MQTT_USERNAME`, `MQTT_PASSWORD`). See the docker-config repo for how the broker is configured.
 
 ## Deployment
 
