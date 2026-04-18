@@ -19,6 +19,7 @@ program
   .option("-e, --watch-extensions <exts>", "comma-separated extensions (no dots)", parseCommaSeparated, [])
   .option("--watch-events <events>", "comma-separated chokidar events", parseCommaSeparated, [])
   .option("-p, --poll-interval-seconds <n>", "chokidar polling interval in seconds", parseFloat)
+  .option("-s, --stability-threshold-seconds <n>", "seconds file must be stable before emitting event", parseFloat)
   .option("--use-polling <bool>", "use polling mode (required for CIFS/NAS, default: true)")
   .option("-b, --mqtt-broker-url <url>", "MQTT broker URL (e.g. mqtt://localhost:1883)")
   .option("-t, --mqtt-topic <topic>", "MQTT topic to publish to")
@@ -31,6 +32,7 @@ const opts = program.opts<{
   watchExtensions: string[];
   watchEvents: string[];
   pollIntervalSeconds?: number;
+  stabilityThresholdSeconds?: number;
   usePolling?: string;
   mqttBrokerUrl?: string;
   mqttTopic?: string;
@@ -47,6 +49,7 @@ interface PublisherConfig {
   watchExtensions: Set<string>;
   watchEvents: string[];
   pollIntervalSeconds: number;
+  stabilityThresholdSeconds: number;
   usePolling: boolean;
   mqttBrokerUrl: string;
   mqttTopic: string;
@@ -85,6 +88,9 @@ function loadConfig(): PublisherConfig {
   const pollIntervalSeconds = opts.pollIntervalSeconds
     ?? Number(process.env["POLL_INTERVAL_SECONDS"] ?? "10");
 
+  const stabilityThresholdSeconds = opts.stabilityThresholdSeconds
+    ?? Number(process.env["STABILITY_THRESHOLD_SECONDS"] ?? "60");
+
   const usePollingRaw = opts.usePolling
     ?? process.env["USE_POLLING"]?.trim()
     ?? "true";
@@ -102,6 +108,7 @@ function loadConfig(): PublisherConfig {
     watchExtensions,
     watchEvents,
     pollIntervalSeconds,
+    stabilityThresholdSeconds,
     usePolling,
     mqttBrokerUrl,
     mqttTopic,
@@ -133,6 +140,7 @@ async function main(): Promise<void> {
   log(LABEL, `  WATCH_EVENTS:          ${config.watchEvents.join(", ")}`);
   log(LABEL, `  USE_POLLING:           ${config.usePolling}`);
   log(LABEL, `  POLL_INTERVAL_SECONDS: ${config.pollIntervalSeconds}`);
+  log(LABEL, `  STABILITY_THRESHOLD_S: ${config.stabilityThresholdSeconds}`);
   log(LABEL, `  MQTT_BROKER_URL:       ${config.mqttBrokerUrl}`);
   log(LABEL, `  MQTT_TOPIC:            ${config.mqttTopic}`);
   log(LABEL, `  MQTT_USERNAME:         ${config.mqttUsername ?? "(none)"}`);
@@ -174,7 +182,8 @@ async function main(): Promise<void> {
     interval: config.usePolling ? config.pollIntervalSeconds * 1000 : undefined,
     ignoreInitial: true,
     awaitWriteFinish: {
-      stabilityThreshold: 2000,
+      stabilityThreshold: config.stabilityThresholdSeconds * 1000,
+      pollInterval: 1000,
     },
   });
 
