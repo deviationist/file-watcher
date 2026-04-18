@@ -4,7 +4,15 @@ services:
     container_name: file-watcher-mosquitto
     ports:
       - "1883:1883"
+      - "8083:8083"
       - "9883:9883"
     volumes:
       - ./mosquitto/config:/mosquitto/config
+    restart: unless-stopped
+
+  mqttx-web:
+    image: emqx/mqttx-web
+    container_name: file-watcher-mqttx-web
+    ports:
+      - "8080:80"
     restart: unless-stopped
