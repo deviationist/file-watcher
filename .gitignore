@@ -4,3 +4,5 @@ dist/
 .claude/
 systemd/
 scripts/plex-refresh.ts
+mosquitto/config/passwd
+*.swp

@@ -18,6 +18,8 @@ program
   .option("-f, --path-prefixes <paths>", "comma-separated path prefixes to filter on", parseCommaSeparated, [])
   .option("-d, --debounce-seconds <n>", "quiet period before firing command", parseFloat)
   .option("-c, --on-change-command <cmd>", "shell command to execute on change")
+  .option("-u, --mqtt-username <user>", "MQTT username (optional)")
+  .option("--mqtt-password <pass>", "MQTT password (optional)")
   .parse();
 
 const opts = program.opts<{
@@ -26,6 +28,8 @@ const opts = program.opts<{
   pathPrefixes: string[];
   debounceSeconds?: number;
   onChangeCommand?: string;
+  mqttUsername?: string;
+  mqttPassword?: string;
 }>();
 
 // ---------------------------------------------------------------------------
@@ -38,6 +42,8 @@ interface SubscriberConfig {
   pathPrefixes: string[];
   debounceSeconds: number;
   onChangeCommand: string;
+  mqttUsername?: string;
+  mqttPassword?: string;
 }
 
 function loadConfig(): SubscriberConfig {
@@ -70,12 +76,17 @@ function loadConfig(): SubscriberConfig {
   const debounceSeconds = opts.debounceSeconds
     ?? Number(process.env["DEBOUNCE_SECONDS"] ?? "30");
 
+  const mqttUsername = opts.mqttUsername ?? process.env["MQTT_USERNAME"]?.trim() ?? undefined;
+  const mqttPassword = opts.mqttPassword ?? process.env["MQTT_PASSWORD"] ?? undefined;
+
   return {
     mqttBrokerUrl,
     mqttTopic,
     pathPrefixes,
     debounceSeconds,
     onChangeCommand,
+    mqttUsername,
+    mqttPassword,
   };
 }
 
@@ -101,6 +112,7 @@ async function main(): Promise<void> {
   log(LABEL, `  PATH_PREFIXES:     ${config.pathPrefixes.join(", ") || "(all)"}`);
   log(LABEL, `  DEBOUNCE_SECONDS:  ${config.debounceSeconds}`);
   log(LABEL, `  ON_CHANGE_COMMAND: ${config.onChangeCommand}`);
+  log(LABEL, `  MQTT_USERNAME:     ${config.mqttUsername ?? "(none)"}`);
 
   // Debounce state
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -135,16 +147,38 @@ async function main(): Promise<void> {
     }, config.debounceSeconds * 1000);
   }
 
-  // Connect to MQTT broker
-  const client: MqttClient = await mqtt.connectAsync(config.mqttBrokerUrl);
+  // Connect to MQTT broker (auto-reconnects every reconnectPeriod ms on failure)
+  const client: MqttClient = await mqtt.connectAsync(config.mqttBrokerUrl, {
+    username: config.mqttUsername,
+    password: config.mqttPassword,
+    reconnectPeriod: 2000,
+  });
   log(LABEL, "Connected to MQTT broker");
 
-  client.on("reconnect", () => log(LABEL, "Reconnecting to MQTT broker..."));
-  client.on("error", (err) => logError(LABEL, `MQTT error: ${err.message}`));
+  async function subscribe(): Promise<void> {
+    try {
+      await client.subscribeAsync(config.mqttTopic, { qos: 1 });
+      log(LABEL, `Subscribed to topic: ${config.mqttTopic}`);
+    } catch (err) {
+      logError(LABEL, `Failed to subscribe: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
-  // Subscribe to topic
-  await client.subscribeAsync(config.mqttTopic, { qos: 1 });
-  log(LABEL, `Subscribed to topic: ${config.mqttTopic}`);
+  await subscribe();
+
+  // Re-subscribe on every reconnect (default `clean: true` clears server-side state)
+  client.on("connect", () => {
+    log(LABEL, "Reconnected to MQTT broker");
+    void subscribe();
+  });
+
+  client.on("offline", () => log(LABEL, "Offline — broker unreachable, will retry"));
+  client.on("error", (err) => {
+    // ECONNREFUSED is expected when broker is restarting; suppress the spam
+    if ((err as NodeJS.ErrnoException).code !== "ECONNREFUSED") {
+      logError(LABEL, `MQTT error: ${err.message}`);
+    }
+  });
 
   // Handle incoming messages
   client.on("message", (_topic, payload) => {

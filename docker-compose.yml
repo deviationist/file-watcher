@@ -4,5 +4,7 @@ services:
     container_name: file-watcher-mosquitto
     ports:
       - "1883:1883"
-    command: mosquitto -c /mosquitto-no-auth.conf
+      - "9883:9883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
     restart: unless-stopped
