@@ -88,3 +88,9 @@ Mosquitto + MQTTX Web live in `~/docker-config/mqtt/` (not in this repo). Connec
 ## Deployment
 
 The publisher and each subscriber run as separate systemd services. The MQTT broker (Mosquitto) runs as a Docker container.
+
+## Downstream integrations
+
+This repo stays domain-agnostic. Subscribers wire their `ON_CHANGE_COMMAND` to external scripts that own the domain logic. Current integrations:
+
+- **Plex auto-rescan** — `/home/xavi/scripts/plex-scan/` houses `plex-orchestrator.ts` (host→container path mapping + Plex section discovery) and `plex-scan.sh` (the Plex API trigger). The music subscriber's `ON_CHANGE_COMMAND` invokes the orchestrator.
