@@ -178,9 +178,14 @@ async function main(): Promise<void> {
     }
   });
 
+  // Paths listed verbatim in WATCH_FOLDERS bypass the extension filter — if the
+  // user pointed at a specific file (e.g. /mnt/music/rekordbox/master.db), they
+  // want events for it regardless of its extension.
+  const explicitFiles = new Set(config.watchFolders);
+
   // Handle file events
   function handleEvent(event: string, filePath: string): void {
-    if (!matchesExtension(filePath, config.watchExtensions)) return;
+    if (!explicitFiles.has(filePath) && !matchesExtension(filePath, config.watchExtensions)) return;
 
     const payload: MqttChangePayload = {
       event,
