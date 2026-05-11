@@ -1,0 +1,16 @@
+[Unit]
+Description=File Watcher Publisher — watch files and publish changes to MQTT
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<user>
+WorkingDirectory=<absolute-path-to-file-watcher>
+EnvironmentFile=<absolute-path-to-file-watcher>/.env
+ExecStart=<absolute-path-to-node> <absolute-path-to-file-watcher>/dist/publisher.js
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

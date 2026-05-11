@@ -56,6 +56,7 @@ All config is via CLI args with env var fallback (CLI takes precedence). See `.e
 ### Publisher
 - `WATCH_FOLDERS` — comma-separated paths to watch (required)
 - `WATCH_EXTENSIONS` — comma-separated extensions without dots
+- `WATCH_IGNORE_PATTERNS` — comma-separated basename globs to ignore (default `._*` to drop macOS AppleDouble metadata files on CIFS)
 - `WATCH_EVENTS` — chokidar events to listen for
 - `USE_POLLING` — use polling mode (default: true, required for CIFS/NAS)
 - `POLL_INTERVAL_SECONDS` — chokidar polling interval (>= 5 for CIFS)
@@ -76,7 +77,9 @@ All config is via CLI args with env var fallback (CLI takes precedence). See `.e
 - Uses polling (`usePolling: true`) because CIFS mounts don't support inotify
 - `awaitWriteFinish` with configurable `stabilityThreshold` (default 60s) so slow CIFS copies generate one event, not many
 - Publisher emits immediately (no debounce) — subscribers own their debounce
-- Subscriber passes `CHANGED_PATHS` (newline-separated) as env var to the command
+- Subscriber passes two env vars to the command:
+  - `CHANGED_PATHS` — newline-separated, deduped absolute host paths (backwards-compat for simple consumers)
+  - `CHANGED_EVENTS` — JSON array of `{event, path, timestamp}` in arrival order, no dedupe. Same per-event shape as the MQTT payload above
 - Path deduplication via Set — same file changing multiple times = one entry
 - The system is fully agnostic — no knowledge of what subscribers do with events
 - Publisher + subscriber auto-reconnect to the broker (2s retry) and the subscriber re-subscribes on each reconnect, so broker restarts are non-fatal
