@@ -17,6 +17,7 @@ program
   .description("Watch folders for file changes and publish events to MQTT")
   .option("-w, --watch-folders <paths>", "comma-separated paths to watch", parseCommaSeparated, [])
   .option("-e, --watch-extensions <exts>", "comma-separated extensions (no dots)", parseCommaSeparated, [])
+  .option("-i, --ignore-patterns <globs>", "comma-separated basename globs to ignore (e.g. ._*)", parseCommaSeparated, [])
   .option("--watch-events <events>", "comma-separated chokidar events", parseCommaSeparated, [])
   .option("-p, --poll-interval-seconds <n>", "chokidar polling interval in seconds", parseFloat)
   .option("-s, --stability-threshold-seconds <n>", "seconds file must be stable before emitting event", parseFloat)
@@ -30,6 +31,7 @@ program
 const opts = program.opts<{
   watchFolders: string[];
   watchExtensions: string[];
+  ignorePatterns: string[];
   watchEvents: string[];
   pollIntervalSeconds?: number;
   stabilityThresholdSeconds?: number;
@@ -47,6 +49,7 @@ const opts = program.opts<{
 interface PublisherConfig {
   watchFolders: string[];
   watchExtensions: Set<string>;
+  ignorePatterns: string[];
   watchEvents: string[];
   pollIntervalSeconds: number;
   stabilityThresholdSeconds: number;
@@ -81,6 +84,10 @@ function loadConfig(): PublisherConfig {
     : (process.env["WATCH_EXTENSIONS"] ?? "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
   const watchExtensions = new Set(extensionsList);
 
+  const ignorePatterns = opts.ignorePatterns.length > 0
+    ? opts.ignorePatterns
+    : (process.env["WATCH_IGNORE_PATTERNS"] ?? "._*").split(",").map((p) => p.trim()).filter(Boolean);
+
   const watchEvents = opts.watchEvents.length > 0
     ? opts.watchEvents
     : (process.env["WATCH_EVENTS"] ?? "add,unlink,change").split(",").map((e) => e.trim()).filter(Boolean);
@@ -106,6 +113,7 @@ function loadConfig(): PublisherConfig {
   return {
     watchFolders,
     watchExtensions,
+    ignorePatterns,
     watchEvents,
     pollIntervalSeconds,
     stabilityThresholdSeconds,
@@ -127,6 +135,13 @@ function matchesExtension(filePath: string, extensions: Set<string>): boolean {
   return extensions.has(ext);
 }
 
+// Glob → basename regex: `*` → `.*`, `?` → `.`, everything else literal.
+function globToBasenameRegex(glob: string): RegExp {
+  const escaped = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  const pattern = escaped.replace(/\*/g, ".*").replace(/\?/g, ".");
+  return new RegExp(`^${pattern}$`);
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -137,6 +152,7 @@ async function main(): Promise<void> {
   log(LABEL, "Starting with config:");
   log(LABEL, `  WATCH_FOLDERS:         ${config.watchFolders.join(", ")}`);
   log(LABEL, `  WATCH_EXTENSIONS:      ${[...config.watchExtensions].join(", ") || "(all)"}`);
+  log(LABEL, `  WATCH_IGNORE_PATTERNS: ${config.ignorePatterns.join(", ") || "(none)"}`);
   log(LABEL, `  WATCH_EVENTS:          ${config.watchEvents.join(", ")}`);
   log(LABEL, `  USE_POLLING:           ${config.usePolling}`);
   log(LABEL, `  POLL_INTERVAL_SECONDS: ${config.pollIntervalSeconds}`);
@@ -176,11 +192,16 @@ async function main(): Promise<void> {
     client.publish(config.mqttTopic, JSON.stringify(payload), { qos: 1 });
   }
 
+  const ignoreRegexes = config.ignorePatterns.map(globToBasenameRegex);
+
   // Start watching
   const watcher: FSWatcher = watch(config.watchFolders, {
     usePolling: config.usePolling,
     interval: config.usePolling ? config.pollIntervalSeconds * 1000 : undefined,
     ignoreInitial: true,
+    ignored: ignoreRegexes.length > 0
+      ? (filePath: string) => ignoreRegexes.some((r) => r.test(path.basename(filePath)))
+      : undefined,
     awaitWriteFinish: {
       stabilityThreshold: config.stabilityThresholdSeconds * 1000,
       pollInterval: 1000,

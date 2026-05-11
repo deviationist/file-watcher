@@ -116,7 +116,7 @@ async function main(): Promise<void> {
 
   // Debounce state
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  let pendingEventCount = 0;
+  let pendingEvents: MqttChangePayload[] = [];
   let changedPaths: Set<string> = new Set();
 
   function scheduleCommand(): void {
@@ -126,15 +126,21 @@ async function main(): Promise<void> {
 
     debounceTimer = setTimeout(() => {
       debounceTimer = null;
-      const count = pendingEventCount;
+      const events = pendingEvents;
       const paths = changedPaths;
-      pendingEventCount = 0;
+      pendingEvents = [];
       changedPaths = new Set();
       const pathsList = [...paths].join("\n");
-      log(LABEL, `Debounce expired after ${count} event(s) — executing command`);
+      const eventsJson = JSON.stringify(events);
+      const byType = events.reduce<Record<string, number>>((acc, e) => {
+        acc[e.event] = (acc[e.event] ?? 0) + 1;
+        return acc;
+      }, {});
+      const summary = Object.entries(byType).map(([k, v]) => `${v} ${k}`).join(", ");
+      log(LABEL, `Debounce expired: ${events.length} event(s) across ${paths.size} path(s) (${summary}) — executing command`);
       log(LABEL, `Changed paths:\n${pathsList}`);
       exec(config.onChangeCommand, {
-        env: { ...process.env, CHANGED_PATHS: pathsList },
+        env: { ...process.env, CHANGED_PATHS: pathsList, CHANGED_EVENTS: eventsJson },
       }, (error, stdout, stderr) => {
         if (error) {
           logError(LABEL, `Command failed (exit ${error.code}): ${error.message}`);
@@ -197,9 +203,9 @@ async function main(): Promise<void> {
 
     if (!matchesPrefix(parsed.path, config.pathPrefixes)) return;
 
-    pendingEventCount++;
+    pendingEvents.push(parsed);
     changedPaths.add(parsed.path);
-    log(LABEL, `${parsed.event}: ${parsed.path} (${pendingEventCount} pending, debounce reset)`);
+    log(LABEL, `${parsed.event}: ${parsed.path} (${pendingEvents.length} pending, debounce reset)`);
     scheduleCommand();
   });
 
@@ -209,7 +215,7 @@ async function main(): Promise<void> {
     if (debounceTimer !== null) {
       clearTimeout(debounceTimer);
       debounceTimer = null;
-      log(LABEL, `Cleared pending debounce timer (${pendingEventCount} event(s), ${changedPaths.size} path(s) will NOT trigger command)`);
+      log(LABEL, `Cleared pending debounce timer (${pendingEvents.length} event(s), ${changedPaths.size} path(s) will NOT trigger command)`);
     }
     client.end(true, () => {
       log(LABEL, "MQTT client disconnected — exiting");

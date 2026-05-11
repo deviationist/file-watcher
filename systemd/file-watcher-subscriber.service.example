@@ -1,0 +1,18 @@
+[Unit]
+Description=File Watcher Subscriber — react to MQTT events with a command
+After=network-online.target
+
+[Service]
+Type=simple
+User=<user>
+WorkingDirectory=<absolute-path-to-file-watcher>
+EnvironmentFile=<absolute-path-to-file-watcher>/.env
+ExecStart=<absolute-path-to-node> <absolute-path-to-file-watcher>/dist/subscriber.js \
+  --path-prefixes <comma-separated-prefixes-this-subscriber-cares-about> \
+  --debounce-seconds <seconds> \
+  --on-change-command "<shell-command-receives-CHANGED_PATHS-env>"
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
