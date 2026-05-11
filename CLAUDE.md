@@ -96,4 +96,4 @@ The publisher and each subscriber run as separate systemd services. The MQTT bro
 
 This repo stays domain-agnostic. Subscribers wire their `ON_CHANGE_COMMAND` to external scripts that own the domain logic. Current integrations:
 
-- **Plex auto-rescan** — `/home/xavi/scripts/plex-scanner/` houses `plex-orchestrator.ts` (host→container path mapping + Plex section discovery) and `plex-scan-trigger.ts` (the Plex API trigger via `@ctrl/plex`). The music subscriber's `ON_CHANGE_COMMAND` invokes the orchestrator with `CHANGED_PATHS` (newline-separated absolute host paths).
+- **Plex auto-rescan** — `/home/xavi/scripts/plex-sync/` houses `plex-orchestrator.ts` (host→container path mapping + Plex section discovery) and `plex-scan-trigger.ts` (the Plex API trigger via `@ctrl/plex`). The music subscriber's `ON_CHANGE_COMMAND` invokes the orchestrator, which consumes `CHANGED_EVENTS` to branch per event type (API-delete on `unlink`, scoped section scan on `add`/`change`).
