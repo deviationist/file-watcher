@@ -2,8 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SERVICES=(file-watcher-publisher file-watcher-plex)
-# To enable additional subscribers, add them above (e.g. file-watcher-rekordbox).
+SERVICES=(file-watcher-publisher file-watcher-plex file-watcher-rekordbox)
 
 case "${1:-}" in
   install)
