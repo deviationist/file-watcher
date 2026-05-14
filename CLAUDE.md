@@ -66,6 +66,9 @@ All config is via CLI args with env var fallback (CLI takes precedence). See `.e
 - `DEBOUNCE_SECONDS` — quiet period before firing command
 - `ON_CHANGE_COMMAND` — shell command to execute (required, receives `CHANGED_PATHS` env var)
 
+### Optional file logger (both)
+- `LOG_FILE` — if set, every log line is also appended to this file (parent dir auto-created). stdout/stderr still receive the line so journald keeps capturing service output. Set per service in its systemd unit; unset to disable.
+
 ### MQTT message format
 
 ```json

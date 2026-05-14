@@ -76,6 +76,12 @@ All settings can be supplied via CLI args or env vars (CLI takes precedence). Se
 | `DEBOUNCE_SECONDS` | `30` | Quiet period after last matching event before firing |
 | `ON_CHANGE_COMMAND` | — (required) | Shell command to execute when debounce expires |
 
+### Optional file logger (both)
+
+| Var | Default | Description |
+|---|---|---|
+| `LOG_FILE` | (disabled) | If set, every log line is also appended to this file. stdout/stderr still receive the line so journald keeps capturing service output. Parent directory is auto-created. Set per service (use a unit-level `--log-file` flag) so publisher/subscriber don't collide on one file. |
+
 ## MQTT message format
 
 Each accepted file event becomes one MQTT message on `MQTT_TOPIC`:

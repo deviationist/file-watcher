@@ -2,7 +2,7 @@ import "dotenv/config";
 import { exec } from "node:child_process";
 import { program } from "commander";
 import mqtt, { type MqttClient } from "mqtt";
-import { log, logError, parseCommaSeparated, type MqttChangePayload } from "./shared.js";
+import { configureFileLogger, log, logError, parseCommaSeparated, type MqttChangePayload } from "./shared.js";
 
 const LABEL = "subscriber";
 
@@ -20,6 +20,7 @@ program
   .option("-c, --on-change-command <cmd>", "shell command to execute on change")
   .option("-u, --mqtt-username <user>", "MQTT username (optional)")
   .option("--mqtt-password <pass>", "MQTT password (optional)")
+  .option("--log-file <path>", "also append logs to this file (parent dir auto-created)")
   .parse();
 
 const opts = program.opts<{
@@ -30,6 +31,7 @@ const opts = program.opts<{
   onChangeCommand?: string;
   mqttUsername?: string;
   mqttPassword?: string;
+  logFile?: string;
 }>();
 
 // ---------------------------------------------------------------------------
@@ -44,6 +46,7 @@ interface SubscriberConfig {
   onChangeCommand: string;
   mqttUsername?: string;
   mqttPassword?: string;
+  logFile?: string;
 }
 
 function loadConfig(): SubscriberConfig {
@@ -79,6 +82,8 @@ function loadConfig(): SubscriberConfig {
   const mqttUsername = opts.mqttUsername ?? process.env["MQTT_USERNAME"]?.trim() ?? undefined;
   const mqttPassword = opts.mqttPassword ?? process.env["MQTT_PASSWORD"] ?? undefined;
 
+  const logFile = opts.logFile ?? process.env["LOG_FILE"]?.trim() ?? undefined;
+
   return {
     mqttBrokerUrl,
     mqttTopic,
@@ -87,6 +92,7 @@ function loadConfig(): SubscriberConfig {
     onChangeCommand,
     mqttUsername,
     mqttPassword,
+    logFile,
   };
 }
 
@@ -105,6 +111,7 @@ function matchesPrefix(filePath: string, prefixes: string[]): boolean {
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  configureFileLogger(config.logFile, LABEL);
 
   log(LABEL, "Starting with config:");
   log(LABEL, `  MQTT_BROKER_URL:   ${config.mqttBrokerUrl}`);
@@ -113,6 +120,7 @@ async function main(): Promise<void> {
   log(LABEL, `  DEBOUNCE_SECONDS:  ${config.debounceSeconds}`);
   log(LABEL, `  ON_CHANGE_COMMAND: ${config.onChangeCommand}`);
   log(LABEL, `  MQTT_USERNAME:     ${config.mqttUsername ?? "(none)"}`);
+  log(LABEL, `  LOG_FILE:          ${config.logFile ?? "(disabled)"}`);
 
   // Debounce state
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
