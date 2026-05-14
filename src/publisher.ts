@@ -5,7 +5,7 @@ import { watch, type FSWatcher } from "chokidar";
 import type { EventName } from "chokidar/handler.js";
 import { program } from "commander";
 import mqtt, { type MqttClient } from "mqtt";
-import { log, logError, parseCommaSeparated, type MqttChangePayload } from "./shared.js";
+import { configureFileLogger, log, logError, parseCommaSeparated, type MqttChangePayload } from "./shared.js";
 
 const LABEL = "publisher";
 
@@ -28,6 +28,7 @@ program
   .option("-t, --mqtt-topic <topic>", "MQTT topic to publish to")
   .option("-u, --mqtt-username <user>", "MQTT username (optional)")
   .option("--mqtt-password <pass>", "MQTT password (optional)")
+  .option("--log-file <path>", "also append logs to this file (parent dir auto-created)")
   .parse();
 
 const opts = program.opts<{
@@ -43,6 +44,7 @@ const opts = program.opts<{
   mqttTopic?: string;
   mqttUsername?: string;
   mqttPassword?: string;
+  logFile?: string;
 }>();
 
 // ---------------------------------------------------------------------------
@@ -64,6 +66,7 @@ interface PublisherConfig {
   mqttTopic: string;
   mqttUsername?: string;
   mqttPassword?: string;
+  logFile?: string;
 }
 
 function loadConfig(): PublisherConfig {
@@ -125,6 +128,8 @@ function loadConfig(): PublisherConfig {
   const mqttUsername = opts.mqttUsername ?? process.env["MQTT_USERNAME"]?.trim() ?? undefined;
   const mqttPassword = opts.mqttPassword ?? process.env["MQTT_PASSWORD"] ?? undefined;
 
+  const logFile = opts.logFile ?? process.env["LOG_FILE"]?.trim() ?? undefined;
+
   return {
     watchFolders,
     watchExtensions,
@@ -138,6 +143,7 @@ function loadConfig(): PublisherConfig {
     mqttTopic,
     mqttUsername,
     mqttPassword,
+    logFile,
   };
 }
 
@@ -164,6 +170,7 @@ function globToBasenameRegex(glob: string): RegExp {
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  configureFileLogger(config.logFile, LABEL);
 
   log(LABEL, "Starting with config:");
   log(LABEL, `  WATCH_FOLDERS:         ${config.watchFolders.join(", ")}`);
@@ -177,6 +184,7 @@ async function main(): Promise<void> {
   log(LABEL, `  MQTT_BROKER_URL:       ${config.mqttBrokerUrl}`);
   log(LABEL, `  MQTT_TOPIC:            ${config.mqttTopic}`);
   log(LABEL, `  MQTT_USERNAME:         ${config.mqttUsername ?? "(none)"}`);
+  log(LABEL, `  LOG_FILE:              ${config.logFile ?? "(disabled)"}`);
 
   // Connect to MQTT broker (auto-reconnects every reconnectPeriod ms on failure)
   const client: MqttClient = await mqtt.connectAsync(config.mqttBrokerUrl, {
