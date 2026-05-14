@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { stat } from "node:fs/promises";
 import path from "node:path";
 import { watch, type FSWatcher } from "chokidar";
 import type { EventName } from "chokidar/handler.js";
@@ -21,6 +22,7 @@ program
   .option("--watch-events <events>", "comma-separated chokidar events", parseCommaSeparated, [])
   .option("-p, --poll-interval-seconds <n>", "chokidar polling interval in seconds", parseFloat)
   .option("-s, --stability-threshold-seconds <n>", "seconds file must be stable before emitting event", parseFloat)
+  .option("--stability-mode <mode>", "stability strategy: 'await-write-finish' (chokidar gates add+change) or 'add-only' (gate only new files)")
   .option("--use-polling <bool>", "use polling mode (required for CIFS/NAS, default: true)")
   .option("-b, --mqtt-broker-url <url>", "MQTT broker URL (e.g. mqtt://localhost:1883)")
   .option("-t, --mqtt-topic <topic>", "MQTT topic to publish to")
@@ -35,6 +37,7 @@ const opts = program.opts<{
   watchEvents: string[];
   pollIntervalSeconds?: number;
   stabilityThresholdSeconds?: number;
+  stabilityMode?: string;
   usePolling?: string;
   mqttBrokerUrl?: string;
   mqttTopic?: string;
@@ -46,6 +49,8 @@ const opts = program.opts<{
 // Config — CLI args override env vars
 // ---------------------------------------------------------------------------
 
+type StabilityMode = "await-write-finish" | "add-only";
+
 interface PublisherConfig {
   watchFolders: string[];
   watchExtensions: Set<string>;
@@ -53,6 +58,7 @@ interface PublisherConfig {
   watchEvents: string[];
   pollIntervalSeconds: number;
   stabilityThresholdSeconds: number;
+  stabilityMode: StabilityMode;
   usePolling: boolean;
   mqttBrokerUrl: string;
   mqttTopic: string;
@@ -98,6 +104,15 @@ function loadConfig(): PublisherConfig {
   const stabilityThresholdSeconds = opts.stabilityThresholdSeconds
     ?? Number(process.env["STABILITY_THRESHOLD_SECONDS"] ?? "60");
 
+  const stabilityModeRaw = opts.stabilityMode
+    ?? process.env["STABILITY_MODE"]?.trim()
+    ?? "add-only";
+  if (stabilityModeRaw !== "await-write-finish" && stabilityModeRaw !== "add-only") {
+    logError(LABEL, `STABILITY_MODE must be 'await-write-finish' or 'add-only' — got '${stabilityModeRaw}'`);
+    process.exit(1);
+  }
+  const stabilityMode: StabilityMode = stabilityModeRaw;
+
   const usePollingRaw = opts.usePolling
     ?? process.env["USE_POLLING"]?.trim()
     ?? "true";
@@ -117,6 +132,7 @@ function loadConfig(): PublisherConfig {
     watchEvents,
     pollIntervalSeconds,
     stabilityThresholdSeconds,
+    stabilityMode,
     usePolling,
     mqttBrokerUrl,
     mqttTopic,
@@ -157,6 +173,7 @@ async function main(): Promise<void> {
   log(LABEL, `  USE_POLLING:           ${config.usePolling}`);
   log(LABEL, `  POLL_INTERVAL_SECONDS: ${config.pollIntervalSeconds}`);
   log(LABEL, `  STABILITY_THRESHOLD_S: ${config.stabilityThresholdSeconds}`);
+  log(LABEL, `  STABILITY_MODE:        ${config.stabilityMode}`);
   log(LABEL, `  MQTT_BROKER_URL:       ${config.mqttBrokerUrl}`);
   log(LABEL, `  MQTT_TOPIC:            ${config.mqttTopic}`);
   log(LABEL, `  MQTT_USERNAME:         ${config.mqttUsername ?? "(none)"}`);
@@ -183,18 +200,66 @@ async function main(): Promise<void> {
   // want events for it regardless of its extension.
   const explicitFiles = new Set(config.watchFolders);
 
-  // Handle file events
-  function handleEvent(event: string, filePath: string): void {
-    if (!explicitFiles.has(filePath) && !matchesExtension(filePath, config.watchExtensions)) return;
-
+  function publish(event: string, filePath: string): void {
     const payload: MqttChangePayload = {
       event,
       path: filePath,
       timestamp: new Date().toISOString(),
     };
-
     log(LABEL, `${event}: ${filePath}`);
     client.publish(config.mqttTopic, JSON.stringify(payload), { qos: 1 });
+  }
+
+  // add-only mode: track files that have just appeared but haven't proven stable yet.
+  // Change events during this window are suppressed (it's still the same write).
+  const pendingAdds = new Map<string, { size: number; mtimeMs: number }>();
+
+  async function verifyStability(filePath: string): Promise<void> {
+    const prev = pendingAdds.get(filePath);
+    if (!prev) return;
+    let current;
+    try {
+      current = await stat(filePath);
+    } catch {
+      pendingAdds.delete(filePath);
+      return;
+    }
+    if (current.size === prev.size && current.mtimeMs === prev.mtimeMs) {
+      pendingAdds.delete(filePath);
+      publish("add", filePath);
+      return;
+    }
+    pendingAdds.set(filePath, { size: current.size, mtimeMs: current.mtimeMs });
+    setTimeout(() => { void verifyStability(filePath); }, config.stabilityThresholdSeconds * 1000);
+  }
+
+  function handleEvent(event: string, filePath: string, stats?: { size?: number; mtimeMs?: number }): void {
+    if (!explicitFiles.has(filePath) && !matchesExtension(filePath, config.watchExtensions)) return;
+
+    if (config.stabilityMode === "add-only") {
+      if (event === "add") {
+        if (pendingAdds.has(filePath)) return;
+        if (stats?.size === undefined || stats?.mtimeMs === undefined) {
+          // chokidar didn't give us stats — publish immediately rather than guess
+          publish(event, filePath);
+          return;
+        }
+        pendingAdds.set(filePath, { size: stats.size, mtimeMs: stats.mtimeMs });
+        setTimeout(() => { void verifyStability(filePath); }, config.stabilityThresholdSeconds * 1000);
+        return;
+      }
+      if (event === "change" && pendingAdds.has(filePath)) {
+        // Still in the initial write window — suppress; verifyStability will publish the add.
+        return;
+      }
+      if (event === "unlink" && pendingAdds.has(filePath)) {
+        // File vanished before stability — drop the pending add silently.
+        pendingAdds.delete(filePath);
+        return;
+      }
+    }
+
+    publish(event, filePath);
   }
 
   const ignoreRegexes = config.ignorePatterns.map(globToBasenameRegex);
@@ -207,15 +272,17 @@ async function main(): Promise<void> {
     ignored: ignoreRegexes.length > 0
       ? (filePath: string) => ignoreRegexes.some((r) => r.test(path.basename(filePath)))
       : undefined,
-    awaitWriteFinish: {
-      stabilityThreshold: config.stabilityThresholdSeconds * 1000,
-      pollInterval: 1000,
-    },
+    // In add-only mode we do stability checks ourselves so change events fire immediately.
+    awaitWriteFinish: config.stabilityMode === "await-write-finish"
+      ? { stabilityThreshold: config.stabilityThresholdSeconds * 1000, pollInterval: 1000 }
+      : false,
   });
 
   for (const event of config.watchEvents) {
     const eventName = event as EventName;
-    watcher.on(eventName, (filePath: string) => handleEvent(event, filePath));
+    watcher.on(eventName, (filePath: string, stats?: { size?: number; mtimeMs?: number }) =>
+      handleEvent(event, filePath, stats),
+    );
   }
 
   watcher.on("error", (error: unknown) => {
