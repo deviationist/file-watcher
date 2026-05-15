@@ -61,12 +61,13 @@ All settings can be supplied via CLI args or env vars (CLI takes precedence). Se
 | Var | Default | Description |
 |---|---|---|
 | `WATCH_FOLDERS` | — (required) | Comma-separated absolute paths to watch |
-| `WATCH_EXTENSIONS` | (all) | Comma-separated extensions without dots (e.g. `mp3,flac`) |
+| `WATCH_EXTENSIONS` | (all) | Comma-separated extensions without dots (e.g. `mp3,flac`). Paths listed verbatim in `WATCH_FOLDERS` (e.g. a single `master.db`) bypass this filter |
 | `WATCH_IGNORE_PATTERNS` | `._*` | Comma-separated basename globs to ignore. Default drops macOS AppleDouble metadata files |
 | `WATCH_EVENTS` | `add,unlink,change` | chokidar events to react to |
 | `USE_POLLING` | `true` | Required for CIFS/SMB mounts |
 | `POLL_INTERVAL_SECONDS` | `10` | Polling interval (≥5 for CIFS) |
 | `STABILITY_THRESHOLD_SECONDS` | `60` | File stability window before emitting an event |
+| `STABILITY_MODE` | `add-only` | `add-only` gates only new files (so in-place edits fire immediately) — best for editors like OneTagger. `await-write-finish` gates both `add` and `change`, safer for many-small-writes environments but adds latency to every change |
 
 ### Subscriber
 
@@ -140,7 +141,7 @@ Copy each, replace the placeholders (user, working directory, node binary path, 
 ## Key design decisions
 
 - **Polling, not inotify.** CIFS mounts don't fire inotify events, so chokidar runs in poll mode by default.
-- **`awaitWriteFinish` waits for the file to stabilize** for `STABILITY_THRESHOLD_SECONDS` before firing — slow NAS copies generate one event, not dozens.
+- **Stability gating defaults to `add-only`.** Only new files wait `STABILITY_THRESHOLD_SECONDS` before firing — slow NAS copies generate one event, not dozens, while in-place edits (e.g. an editor rewriting a tag) fire immediately. Switch to `await-write-finish` if your workflow involves many small writes per change.
 - **Publisher emits immediately, subscribers own their debounce.** Each subscriber chooses how long to coalesce events for its workload.
 - **Resilient to broker restarts.** Both binaries auto-reconnect every 2 s; the subscriber re-subscribes on each reconnect.
 - **Fan-out is free.** Add a new reaction (e.g. "back up changed files to S3") by writing a new subscriber unit pointing at the same broker. No publisher change needed.
