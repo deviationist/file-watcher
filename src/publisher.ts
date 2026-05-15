@@ -24,7 +24,7 @@ program
   .option("-s, --stability-threshold-seconds <n>", "seconds file must be stable before emitting event", parseFloat)
   .option("--stability-mode <mode>", "stability strategy: 'await-write-finish' (chokidar gates add+change) or 'add-only' (gate only new files)")
   .option("--use-polling <bool>", "use polling mode (required for CIFS/NAS, default: true)")
-  .option("-b, --mqtt-broker-url <url>", "MQTT broker URL (e.g. mqtt://localhost:1883)")
+  .option("-b, --mqtt-broker-url <url>", "MQTT broker URL (e.g. mqtt://broker.example.com:1883)")
   .option("-t, --mqtt-topic <topic>", "MQTT topic to publish to")
   .option("-u, --mqtt-username <user>", "MQTT username (optional)")
   .option("--mqtt-password <pass>", "MQTT password (optional)")

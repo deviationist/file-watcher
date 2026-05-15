@@ -1,17 +1,20 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import mqtt, { type MqttClient } from "mqtt";
+import "dotenv/config";
 import type { MqttChangePayload } from "./shared.js";
 
-const BROKER_URL = "mqtt://localhost:1883";
+const BROKER_URL = process.env["MQTT_BROKER_URL"];
+const USERNAME = process.env["MQTT_USERNAME"];
+const PASSWORD = process.env["MQTT_PASSWORD"];
 const TOPIC = "file-watcher/test";
 
-describe("MQTT pub/sub integration", () => {
+describe.skipIf(!BROKER_URL)("MQTT pub/sub integration", () => {
   let publisher: MqttClient;
   let subscriber: MqttClient;
 
   beforeAll(async () => {
-    publisher = await mqtt.connectAsync(BROKER_URL);
-    subscriber = await mqtt.connectAsync(BROKER_URL);
+    publisher = await mqtt.connectAsync(BROKER_URL!, { username: USERNAME, password: PASSWORD });
+    subscriber = await mqtt.connectAsync(BROKER_URL!, { username: USERNAME, password: PASSWORD });
     await subscriber.subscribeAsync(TOPIC, { qos: 1 });
   });
 
