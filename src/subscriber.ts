@@ -13,7 +13,7 @@ const LABEL = "subscriber";
 program
   .name("file-watcher-subscriber")
   .description("Subscribe to MQTT file-change events, debounce, and run a command")
-  .option("-b, --mqtt-broker-url <url>", "MQTT broker URL (e.g. mqtt://localhost:1883)")
+  .option("-b, --mqtt-broker-url <url>", "MQTT broker URL (e.g. mqtt://broker.example.com:1883)")
   .option("-t, --mqtt-topic <topic>", "MQTT topic to subscribe to")
   .option("-f, --path-prefixes <paths>", "comma-separated path prefixes to filter on", parseCommaSeparated, [])
   .option("-d, --debounce-seconds <n>", "quiet period before firing command", parseFloat)

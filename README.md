@@ -52,7 +52,7 @@ All settings can be supplied via CLI args or env vars (CLI takes precedence). Se
 
 | Var | Default | Description |
 |---|---|---|
-| `MQTT_BROKER_URL` | — (required) | e.g. `mqtt://localhost:1883` |
+| `MQTT_BROKER_URL` | — (required) | e.g. `mqtt://broker.example.com:1883` or `wss://broker.example.com/mqtt` |
 | `MQTT_TOPIC` | `file-watcher/change` | Topic for publish/subscribe |
 | `MQTT_USERNAME` / `MQTT_PASSWORD` | — | Optional credentials |
 
