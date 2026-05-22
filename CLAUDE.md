@@ -32,7 +32,7 @@ src/watcher.ts            — legacy standalone daemon (pre-MQTT)
 .env.example              — documented config template
 ```
 
-The MQTT broker (Mosquitto) and web client (MQTTX Web) live in `~/docker-config/mqtt/` as shared infrastructure — not in this project.
+The MQTT broker (Mosquitto) and web client (MQTTX Web) live in `~/docker-root/mqtt/` on quim as shared infrastructure — not in this project.
 
 ## Commands
 
@@ -89,7 +89,7 @@ All config is via CLI args with env var fallback (CLI takes precedence). See `.e
 
 ## Broker
 
-Mosquitto + MQTTX Web live in `~/docker-config/mqtt/` (not in this repo). Connection details are in `.env` (`MQTT_BROKER_URL`, `MQTT_USERNAME`, `MQTT_PASSWORD`). See the docker-config repo for how the broker is configured.
+Mosquitto + MQTTX Web live in `~/docker-root/mqtt/` on quim (not in this repo). Connection details are in `.env` (`MQTT_BROKER_URL`, `MQTT_USERNAME`, `MQTT_PASSWORD`). See the docker-root repo (branch `docker-quim`) for how the broker is configured.
 
 ## Deployment
 
