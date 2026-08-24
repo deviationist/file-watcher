@@ -102,3 +102,43 @@ event is lost rather than late. Keep a slow safety sweep (~5 min) as a backstop.
 quim mounts NFSv4.2. NFSv4 is stateful and carries OPEN/CLOSE, which is what
 lets the server translate a client close into a VFS close and therefore an
 `IN_CLOSE_WRITE`. NFSv3 is stateless and this reasoning does not carry over.
+
+## Tooling: who exposes these events
+
+Checked 2026-08-24. The distinction that matters is whether a library passes the
+kernel's event mask through, or abstracts it into create/modify/delete.
+
+| library / tool                | language | `CLOSE_WRITE` / `MOVED_TO` |
+|-------------------------------|----------|----------------------------|
+| **chokidar**                  | Node     | **no** — built on `fs.watch`, which surfaces only `rename` and `change`. Zero mentions of either event in the package. Not a missing option: the information is discarded a layer below it. |
+| **fsnotify**                  | Go       | **no** — long-standing request, fsnotify/fsnotify#235 |
+| **rjeczalik/notify**          | Go       | **yes** — `InCloseWrite`, `InMovedTo` as first-class platform events |
+| **illarion/gonotify**         | Go       | yes — thin wrapper over the raw mask |
+| **inotify-tools** (`inotifywait`) | C    | yes — `-e close_write,moved_to` |
+| **incron**                    | C        | yes — cron-like, triggers a command per event |
+| **@parcel/watcher**, **Watchman** | C++  | no — both abstract to create/update/delete |
+
+`rjeczalik/notify` documents the temp-file-then-rename case as the reason both
+events are needed, which is the same trap rsync and Resilio set here. The
+pattern is well known; the measurements above only confirm it applies to this
+setup.
+
+### Options for this project
+
+1. **Keep the publisher, swap the event source.** Spawn
+   `inotifywait -m -e close_write,moved_to --format '%e|%w%f'` and read stdout.
+   The publisher's MQTT wiring, debouncing, extension filtering, config and
+   tests are untouched; only the layer that produces paths changes. Costs one
+   Debian package (`inotify-tools`) and no native module.
+
+2. **Rewrite the watcher in Go** on `rjeczalik/notify`. Cleaner and a single
+   static binary, but discards working logic to solve a problem that is one
+   layer deep.
+
+3. **Stay on chokidar** with the current `add-only` stability check. Works, and
+   is a heuristic: ~15 s of latency on every file, and fooled by a writer that
+   stalls longer than the window.
+
+Option 1 is the recommendation: it buys the definitive signal for the smallest
+change, and leaves the door open to option 2 if the watcher is ever rewritten
+for other reasons.
