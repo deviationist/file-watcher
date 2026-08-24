@@ -1,6 +1,8 @@
 import "dotenv/config";
 import { stat } from "node:fs/promises";
 import path from "node:path";
+import { spawn } from "node:child_process";
+import { statSync, readdirSync } from "node:fs";
 import { watch, type FSWatcher } from "chokidar";
 import type { EventName } from "chokidar/handler.js";
 import { program } from "commander";
@@ -21,6 +23,9 @@ program
   .option("-i, --ignore-patterns <globs>", "comma-separated basename globs to ignore (e.g. ._*)", parseCommaSeparated, [])
   .option("--watch-events <events>", "comma-separated chokidar events", parseCommaSeparated, [])
   .option("-p, --poll-interval-seconds <n>", "chokidar polling interval in seconds", parseFloat)
+  .option("--event-source <name>", "chokidar | inotify")
+  .option("--sweep-folders <paths>", "comma-separated folders to re-announce periodically")
+  .option("--sweep-interval-seconds <n>", "how often to sweep", parseFloat)
   .option("-s, --stability-threshold-seconds <n>", "seconds file must be stable before emitting event", parseFloat)
   .option("--stability-mode <mode>", "stability strategy: 'await-write-finish' (chokidar gates add+change) or 'add-only' (gate only new files)")
   .option("--use-polling <bool>", "use polling mode (required for CIFS/NAS, default: true)")
@@ -39,6 +44,9 @@ const opts = program.opts<{
   pollIntervalSeconds?: number;
   stabilityThresholdSeconds?: number;
   stabilityMode?: string;
+  eventSource?: string;
+  sweepFolders?: string;
+  sweepIntervalSeconds?: number;
   usePolling?: string;
   mqttBrokerUrl?: string;
   mqttTopic?: string;
@@ -61,6 +69,9 @@ interface PublisherConfig {
   pollIntervalSeconds: number;
   stabilityThresholdSeconds: number;
   stabilityMode: StabilityMode;
+  eventSource: string;
+  sweepFolders: string[];
+  sweepIntervalSeconds: number;
   usePolling: boolean;
   mqttBrokerUrl: string;
   mqttTopic: string;
@@ -116,6 +127,26 @@ function loadConfig(): PublisherConfig {
   }
   const stabilityMode: StabilityMode = stabilityModeRaw;
 
+  // "inotify" reads CLOSE_WRITE and MOVED_TO from the kernel, which say a
+  // writer closed the file or that it arrived by atomic rename -- both
+  // definitive, where a stability window only infers completion from a lack of
+  // change. See docs/file-arrival-detection.md for the measurements behind it.
+  const eventSource = (opts.eventSource ?? process.env["EVENT_SOURCE"]?.trim() ?? "chokidar");
+  if (eventSource !== "chokidar" && eventSource !== "inotify") {
+    logError(LABEL, `EVENT_SOURCE must be 'chokidar' or 'inotify' — got '${eventSource}'`);
+    process.exit(1);
+  }
+
+  // Belt and braces for the inotify path: inotify can drop events when its
+  // queue overflows, and with no polling behind it a dropped event is lost
+  // rather than late. Re-announcing what is still sitting in a drain-to-empty
+  // folder costs nothing, because the consumer refuses a path already in the
+  // chain and skips one that has left.
+  const sweepFolders = parseCommaSeparated(
+    opts.sweepFolders ?? process.env["SWEEP_FOLDERS"] ?? "", []);
+  const sweepIntervalSeconds = Number(
+    opts.sweepIntervalSeconds ?? process.env["SWEEP_INTERVAL_SECONDS"] ?? "300");
+
   const usePollingRaw = opts.usePolling
     ?? process.env["USE_POLLING"]?.trim()
     ?? "true";
@@ -138,6 +169,9 @@ function loadConfig(): PublisherConfig {
     pollIntervalSeconds,
     stabilityThresholdSeconds,
     stabilityMode,
+    eventSource,
+    sweepFolders,
+    sweepIntervalSeconds,
     usePolling,
     mqttBrokerUrl,
     mqttTopic,
@@ -168,6 +202,99 @@ function globToBasenameRegex(glob: string): RegExp {
 // Main
 // ---------------------------------------------------------------------------
 
+
+/// Read arrivals straight from the kernel.
+///
+/// CLOSE_WRITE means the writer closed the file; MOVED_TO means it arrived by
+/// rename and was complete before it had that name. Between them they cover
+/// every way a file lands here -- cp, scp, mv either way, rsync, Resilio --
+/// which is measured in docs/file-arrival-detection.md.
+///
+/// Directories are watched, never files: a watch on a file follows the inode,
+/// and a rename-into-place replaces it, leaving a watch on nothing.
+function startInotify(
+  config: PublisherConfig,
+  ignoreRegexes: RegExp[],
+  handleEvent: (event: string, filePath: string, stats?: { size?: number; mtimeMs?: number }) => void,
+): void {
+  const dirs = config.watchFolders.filter((f: string) => {
+    try { return statSync(f).isDirectory(); } catch { return false; }
+  });
+  if (dirs.length === 0) {
+    logError(LABEL, "EVENT_SOURCE=inotify needs at least one watchable directory");
+    process.exit(1);
+  }
+
+  const spawnWatcher = (): void => {
+    const child = spawn("inotifywait", [
+      "-m", "-q", "-r",
+      "-e", "close_write", "-e", "moved_to", "-e", "delete", "-e", "moved_from",
+      "--format", "%e|%w%f",
+      ...dirs,
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+
+    let buffered = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      buffered += chunk.toString();
+      const lines = buffered.split("\n");
+      buffered = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line) continue;
+        const sep = line.indexOf("|");
+        if (sep === -1) continue;
+        const events = line.slice(0, sep);
+        const filePath = line.slice(sep + 1);
+        const base = path.basename(filePath);
+
+        // Temp files, ours and other tools'. rsync writes .name.XXXXXX and
+        // Resilio writes .!sync, and both CLOSE_WRITE the temp a moment before
+        // renaming it into place -- acting on that ingests a partial file under
+        // a name nobody meant.
+        if (base.startsWith(".")) continue;
+        if (ignoreRegexes.some((r) => r.test(base))) continue;
+
+        const gone = events.includes("DELETE") || events.includes("MOVED_FROM");
+        handleEvent(gone ? "unlink" : "add", filePath);
+      }
+    });
+    child.stderr.on("data", (c: Buffer) => logError(LABEL, `inotifywait: ${c.toString().trim()}`));
+    child.on("exit", (code) => {
+      // Going deaf silently is the failure that matters here, so say so and
+      // come back rather than sitting there looking healthy.
+      logError(LABEL, `inotifywait exited (${code}); restarting in 5s`);
+      setTimeout(spawnWatcher, 5000);
+    });
+  };
+
+  spawnWatcher();
+  log(LABEL, `inotify watching ${dirs.length} folder(s) for close_write, moved_to`);
+}
+
+/// Re-announce whatever is still sitting in a folder that should drain.
+///
+/// Only for folders that empty by design: re-announcing a library folder would
+/// be thousands of messages. The consumer refuses a path already in the chain
+/// and skips one that has left, so a repeat here is cheap by construction.
+function startSweep(
+  config: PublisherConfig,
+  handleEvent: (event: string, filePath: string, stats?: { size?: number; mtimeMs?: number }) => void,
+): void {
+  if (config.sweepFolders.length === 0 || config.sweepIntervalSeconds <= 0) return;
+  setInterval(() => {
+    for (const dir of config.sweepFolders) {
+      let names: string[];
+      try { names = readdirSync(dir); } catch { continue; }
+      for (const name of names) {
+        if (name.startsWith(".")) continue;
+        if (!matchesExtension(name, config.watchExtensions)) continue;
+        log(LABEL, `sweep: re-announcing ${name}`);
+        handleEvent("add", path.join(dir, name));
+      }
+    }
+  }, config.sweepIntervalSeconds * 1000).unref?.();
+  log(LABEL, `sweep every ${config.sweepIntervalSeconds}s over ${config.sweepFolders.join(", ")}`);
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
   configureFileLogger(config.logFile, LABEL);
@@ -181,6 +308,8 @@ async function main(): Promise<void> {
   log(LABEL, `  POLL_INTERVAL_SECONDS: ${config.pollIntervalSeconds}`);
   log(LABEL, `  STABILITY_THRESHOLD_S: ${config.stabilityThresholdSeconds}`);
   log(LABEL, `  STABILITY_MODE:        ${config.stabilityMode}`);
+  log(LABEL, `  EVENT_SOURCE:          ${config.eventSource}`);
+  log(LABEL, `  SWEEP_FOLDERS:         ${config.sweepFolders.join(", ") || "(none)"}`);
   log(LABEL, `  MQTT_BROKER_URL:       ${config.mqttBrokerUrl}`);
   log(LABEL, `  MQTT_TOPIC:            ${config.mqttTopic}`);
   log(LABEL, `  MQTT_USERNAME:         ${config.mqttUsername ?? "(none)"}`);
@@ -271,6 +400,13 @@ async function main(): Promise<void> {
   }
 
   const ignoreRegexes = config.ignorePatterns.map(globToBasenameRegex);
+
+    if (config.eventSource === "inotify") {
+      startInotify(config, ignoreRegexes, handleEvent);
+      startSweep(config, handleEvent);
+      return;
+    }
+
 
   // Start watching
   const watcher: FSWatcher = watch(config.watchFolders, {
