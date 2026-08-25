@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { catchUpVerdict, classifyInotify, unlinkWhilePending } from "./events.js";
+import { catchUpVerdict, changeIsReal, classifyInotify, unlinkWhilePending } from "./events.js";
 
 const WINDOW = 600_000;
 
@@ -112,5 +112,36 @@ describe("what the periodic reconcile should announce", () => {
     // makes a file falling between two of them impossible, and excluding the
     // boundary would open a one-millisecond hole in it.
     expect(catchUpVerdict(1_000, undefined, CUTOFF)).toBe("announce");
+  });
+});
+
+describe("whether a CLOSE_WRITE is worth calling a change", () => {
+  const was = { mtimeMs: 1_000, size: 500 };
+
+  it("is a change when the file was written", () => {
+    expect(changeIsReal({ mtimeMs: 2_000, size: 500 }, was)).toBe(true);
+  });
+
+  it("is a change when the file grew without its mtime moving", () => {
+    // Both are compared because either alone can stay still across a real
+    // write: filesystems have finite mtime resolution, and a rewrite of equal
+    // length leaves the size alone.
+    expect(changeIsReal({ mtimeMs: 1_000, size: 900 }, was)).toBe(true);
+  });
+
+  it("is not a change when nothing about the file differs", () => {
+    // The two cases this exists for. One save reported twice, two milliseconds
+    // apart, is one change. And a close that wrote nothing at all — something
+    // opens a published file about fifteen seconds after it lands — is not a
+    // change however long it waits, which is why this asks what changed rather
+    // than how fast the events came.
+    expect(changeIsReal({ mtimeMs: 1_000, size: 500 }, was)).toBe(false);
+  });
+
+  it("is a change when we have never announced the file", () => {
+    // Nothing to be the same as. Suppressing here would drop the first thing we
+    // ever say about a file, which is the one event nothing downstream can
+    // recover from.
+    expect(changeIsReal({ mtimeMs: 1_000, size: 500 }, undefined)).toBe(true);
   });
 });

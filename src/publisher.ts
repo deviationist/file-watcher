@@ -1,7 +1,8 @@
 import "dotenv/config";
 import { stat } from "node:fs/promises";
 import path from "node:path";
-import { catchUpVerdict, classifyInotify, unlinkWhilePending, type PendingOrigin } from "./events.js";
+import { catchUpVerdict, changeIsReal, classifyInotify, unlinkWhilePending,
+         type Announced, type PendingOrigin } from "./events.js";
 import { spawn } from "node:child_process";
 import { statSync, readdirSync } from "node:fs";
 import { watch, type FSWatcher } from "chokidar";
@@ -340,7 +341,7 @@ function startInotify(
 // the sweep's private memory -- and `announced` alone collides with catchUp's
 // own count of what it announced this pass, which tsc caught and then emitted
 // anyway.
-const announcedAt = new Map<string, number>();
+const announcedAt = new Map<string, Announced>();
 
 /// Record a live announcement, so the reconcile knows it is already done.
 ///
@@ -349,7 +350,10 @@ const announcedAt = new Map<string, number>();
 /// here -- there is nothing to remember and the entry is dropped instead.
 function rememberAnnounced(event: string, filePath: string): void {
   if (event === "unlink") { announcedAt.delete(filePath); return; }
-  try { announcedAt.set(filePath, statSync(filePath).mtimeMs); } catch { announcedAt.delete(filePath); }
+  try {
+    const st = statSync(filePath);
+    announcedAt.set(filePath, { mtimeMs: st.mtimeMs, size: st.size });
+  } catch { announcedAt.delete(filePath); }
 }
 
 function catchUp(
@@ -367,8 +371,8 @@ function catchUp(
     if (!matchesExtension(name, config.watchExtensions)) return;
     let st;
     try { st = statSync(filePath); } catch { return; }
-    if (catchUpVerdict(st.mtimeMs, announcedAt.get(filePath), cutoff) === "skip") return;
-    announcedAt.set(filePath, st.mtimeMs);
+    if (catchUpVerdict(st.mtimeMs, announcedAt.get(filePath)?.mtimeMs, cutoff) === "skip") return;
+    announcedAt.set(filePath, { mtimeMs: st.mtimeMs, size: st.size });
     announced++;
     handleEvent("add", filePath, { size: st.size, mtimeMs: st.mtimeMs }, "catchup");
   };
@@ -392,7 +396,7 @@ function catchUp(
   }
   // Forget what has aged out of the window, so this cannot grow without bound
   // on a long-running process.
-  for (const [seen, at] of announcedAt) if (at < cutoff) announcedAt.delete(seen);
+  for (const [seen, a] of announcedAt) if (a.mtimeMs < cutoff) announcedAt.delete(seen);
   if (announced) {
     log(LABEL, `catch-up (${reason}): re-announced ${announced} file(s) `
       + `modified in the last ${config.catchUpWindowSeconds}s`);
@@ -486,6 +490,19 @@ async function main(): Promise<void> {
   const explicitFiles = new Set(config.watchFolders);
 
   function publish(event: string, filePath: string): void {
+    // A `change` has to prove it is one. CLOSE_WRITE says a file open for
+    // writing was closed; it does not say anything was written, and both a tag
+    // editor's second write cycle and the phantom close fifteen seconds after a
+    // publish exploit that. Only `change`: an arrival is news whatever the
+    // bytes say, and a removal has no file left to stat.
+    if (event === "change") {
+      let st;
+      try { st = statSync(filePath); } catch { return; }   // gone; nothing to say
+      if (!changeIsReal({ mtimeMs: st.mtimeMs, size: st.size }, announcedAt.get(filePath))) {
+        log(LABEL, `change: ${filePath} — nothing written, not announced`);
+        return;
+      }
+    }
     const payload: MqttChangePayload = {
       event,
       path: filePath,
