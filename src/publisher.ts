@@ -72,6 +72,8 @@ interface PublisherConfig {
   eventSource: string;
   sweepFolders: string[];
   sweepIntervalSeconds: number;
+  catchUpWindowSeconds: number;
+  catchUpIntervalSeconds: number;
   usePolling: boolean;
   mqttBrokerUrl: string;
   mqttTopic: string;
@@ -146,6 +148,13 @@ function loadConfig(): PublisherConfig {
     opts.sweepFolders ?? process.env["SWEEP_FOLDERS"] ?? "", []);
   const sweepIntervalSeconds = Number(
     opts.sweepIntervalSeconds ?? process.env["SWEEP_INTERVAL_SECONDS"] ?? "300");
+  // Ten minutes covers a restart with room to spare, and is short enough that a
+  // catch-up after a long outage does not replay a day of work. Set 0 to disable.
+  const catchUpIntervalSeconds = Number(process.env["CATCHUP_INTERVAL_SECONDS"] ?? "300");
+  // Twice the interval, so consecutive runs overlap and nothing can fall
+  // between them. Set either to 0 to disable.
+  const catchUpWindowSeconds = Number(
+    process.env["CATCHUP_WINDOW_SECONDS"] ?? String(catchUpIntervalSeconds * 2));
 
   const usePollingRaw = opts.usePolling
     ?? process.env["USE_POLLING"]?.trim()
@@ -172,6 +181,8 @@ function loadConfig(): PublisherConfig {
     eventSource,
     sweepFolders,
     sweepIntervalSeconds,
+    catchUpWindowSeconds,
+    catchUpIntervalSeconds,
     usePolling,
     mqttBrokerUrl,
     mqttTopic,
@@ -301,6 +312,12 @@ function startInotify(
         handleEvent("add", filePath);
       }
     });
+    // No overflow branch here, deliberately. Measured 2026-08-25: with the
+    // reader stopped and `max_queued_events` at 1, 1599 of 1600 events were
+    // dropped and inotifywait said **nothing** -- not on stderr, not as an
+    // event on stdout, with or without -q. A queue overflow is invisible from
+    // this side, so it cannot be reacted to; it can only be reconciled against,
+    // which is what the periodic catch-up is for.
     child.stderr.on("data", (c: Buffer) => logError(LABEL, `inotifywait: ${c.toString().trim()}`));
     child.on("exit", (code) => {
       // Going deaf silently is the failure that matters here, so say so and
@@ -312,7 +329,106 @@ function startInotify(
 
   spawnWatcher();
   log(LABEL, `inotify watching ${dirs.length} folder(s) for close_write, create, moved_to`);
+  // After the watches exist, not before: a file landing during establishment is
+  // exactly what this is for, and running it first would leave that window open.
+  catchUp(config, handleEvent, "startup");
+  startCatchUp(config, handleEvent);
 }
+
+/// Announce whatever changed while nobody was listening.
+///
+/// Two gaps this closes, both silent and both the same shape -- an event that
+/// is never delivered and never reported:
+///
+///   * **The startup gap.** Between this process starting and inotify watches
+///     being established, anything that lands is missed. Every restart is a
+///     small window of exactly that.
+///   * **Queue overflow.** The kernel queue is finite (16384 events here). Past
+///     it, inotify drops events and says so once on stderr. `SWEEP_FOLDERS`
+///     recovers a lost arrival in Ingress; nothing recovered a lost *edit* to a
+///     library file, and since an edit only reaches Plex through its event,
+///     losing one loses the edit.
+///
+/// Bounded by mtime rather than re-announcing everything: the library is
+/// thousands of files and a blanket re-announce would put every one of them
+/// through the chain. Only what changed inside the window is announced.
+///
+/// Announced as `add` even though most of these are edits, because from here
+/// the two are indistinguishable -- and the consumer resolves it anyway by
+/// asking whether Plex already holds the file.
+///
+/// Each (path, mtime) is announced at most once. Repeats are safe by
+/// construction -- the consumer refuses a path already in the chain, and a
+/// re-read Plex agrees with costs nothing -- but a run every ten minutes over
+/// an overlapping window would otherwise re-announce the same edit three times
+/// for no new information.
+const caughtUp = new Map<string, number>();
+
+function catchUp(
+  config: PublisherConfig,
+  handleEvent: (event: string, filePath: string, stats?: { size?: number; mtimeMs?: number }) => void,
+  reason: string,
+): number {
+  if (config.catchUpWindowSeconds <= 0) return 0;
+  const cutoff = Date.now() - config.catchUpWindowSeconds * 1000;
+  let announced = 0;
+
+  const consider = (filePath: string, name: string): void => {
+    if (name.startsWith(".")) return;
+    if (!matchesExtension(name, config.watchExtensions)) return;
+    let st;
+    try { st = statSync(filePath); } catch { return; }
+    if (st.mtimeMs < cutoff) return;
+    if (caughtUp.get(filePath) === st.mtimeMs) return;
+    caughtUp.set(filePath, st.mtimeMs);
+    announced++;
+    handleEvent("add", filePath, { size: st.size, mtimeMs: st.mtimeMs });
+  };
+
+  const walk = (dir: string): void => {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) { if (!entry.name.startsWith(".")) walk(full); continue; }
+      consider(full, entry.name);
+    }
+  };
+
+  for (const target of config.watchFolders) {
+    try {
+      // WATCH_FOLDERS can name a file directly -- master.db is watched that way.
+      if (statSync(target).isDirectory()) walk(target);
+      else consider(target, path.basename(target));
+    } catch { /* gone or unreadable; the mount check elsewhere owns that */ }
+  }
+  // Forget what has aged out of the window, so this cannot grow without bound
+  // on a long-running process.
+  for (const [seen, at] of caughtUp) if (at < cutoff) caughtUp.delete(seen);
+  if (announced) {
+    log(LABEL, `catch-up (${reason}): re-announced ${announced} file(s) `
+      + `modified in the last ${config.catchUpWindowSeconds}s`);
+  }
+  return announced;
+}
+
+
+/// Run the catch-up on a timer, because a dropped event is never reported.
+///
+/// The window is twice the interval so consecutive runs overlap -- a file
+/// modified between two sweeps must be inside at least one of them, and the
+/// per-(path, mtime) memory makes the overlap free.
+function startCatchUp(
+  config: PublisherConfig,
+  handleEvent: (event: string, filePath: string, stats?: { size?: number; mtimeMs?: number }) => void,
+): void {
+  if (config.catchUpIntervalSeconds <= 0 || config.catchUpWindowSeconds <= 0) return;
+  setInterval(() => catchUp(config, handleEvent, "periodic"),
+              config.catchUpIntervalSeconds * 1000).unref?.();
+  log(LABEL, `catch-up every ${config.catchUpIntervalSeconds}s `
+    + `over files modified in the last ${config.catchUpWindowSeconds}s`);
+}
+
 
 /// Re-announce whatever is still sitting in a folder that should drain.
 ///
