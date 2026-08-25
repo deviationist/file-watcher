@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyInotify, unlinkWhilePending } from "./events.js";
+import { catchUpVerdict, classifyInotify, unlinkWhilePending } from "./events.js";
 
 const WINDOW = 600_000;
 
@@ -71,5 +71,46 @@ describe("a removal arriving while an add is still pending", () => {
   // observed 2026-08-25, a file deleted six seconds after a catch-up run.
   it("publishes the removal when the pending add came from the catch-up", () => {
     expect(unlinkWhilePending("catchup")).toBe("publish");
+  });
+});
+
+describe("what the periodic reconcile should announce", () => {
+  const CUTOFF = 1_000;
+
+  it("announces a file nothing has announced", () => {
+    // The case it exists for: inotify dropped the event, so nothing published,
+    // so nothing recorded. Measured once at 1599 of 1600 lost, silently.
+    expect(catchUpVerdict(2_000, undefined, CUTOFF)).toBe("announce");
+  });
+
+  it("skips one the live path already announced", () => {
+    // This is the fix. The memory used to hold only the sweep's own
+    // announcements, so every published track was announced a second time
+    // minutes later -- a whole downstream run for a file nothing had touched.
+    expect(catchUpVerdict(2_000, 2_000, CUTOFF)).toBe("skip");
+  });
+
+  it("announces one that was modified after it was announced", () => {
+    // Keyed on the mtime, not the path. A file announced and then edited is
+    // genuinely news again, and a path-only memory would swallow it.
+    expect(catchUpVerdict(2_500, 2_000, CUTOFF)).toBe("announce");
+  });
+
+  it("skips anything older than the window", () => {
+    expect(catchUpVerdict(999, undefined, CUTOFF)).toBe("skip");
+  });
+
+  it("skips an old file even if it was never announced", () => {
+    // Not a gap: the window is twice the sweep interval, so a file this old was
+    // inside at least two earlier sweeps. Announcing it now would mean
+    // re-announcing the whole library on every restart.
+    expect(catchUpVerdict(0, undefined, CUTOFF)).toBe("skip");
+  });
+
+  it("announces a file exactly on the cutoff", () => {
+    // The boundary is inclusive on purpose: the overlap between sweeps is what
+    // makes a file falling between two of them impossible, and excluding the
+    // boundary would open a one-millisecond hole in it.
+    expect(catchUpVerdict(1_000, undefined, CUTOFF)).toBe("announce");
   });
 });

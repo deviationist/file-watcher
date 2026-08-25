@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { stat } from "node:fs/promises";
 import path from "node:path";
-import { classifyInotify, unlinkWhilePending, type PendingOrigin } from "./events.js";
+import { catchUpVerdict, classifyInotify, unlinkWhilePending, type PendingOrigin } from "./events.js";
 import { spawn } from "node:child_process";
 import { statSync, readdirSync } from "node:fs";
 import { watch, type FSWatcher } from "chokidar";
@@ -332,7 +332,25 @@ function startInotify(
 /// re-read Plex agrees with costs nothing -- but a run every ten minutes over
 /// an overlapping window would otherwise re-announce the same edit three times
 /// for no new information.
-const caughtUp = new Map<string, number>();
+//: What has been announced for each path, and at which mtime.
+//
+// Written by *both* paths -- the live inotify one and the sweep -- which is
+// what stops the sweep re-announcing what the kernel already told us about.
+// Named for what it holds rather than for the sweep, because it stopped being
+// the sweep's private memory -- and `announced` alone collides with catchUp's
+// own count of what it announced this pass, which tsc caught and then emitted
+// anyway.
+const announcedAt = new Map<string, number>();
+
+/// Record a live announcement, so the reconcile knows it is already done.
+///
+/// One `stat` per published event, which is nothing next to the downstream run
+/// it saves. If the file is already gone -- an unlink, or a rename that beat us
+/// here -- there is nothing to remember and the entry is dropped instead.
+function rememberAnnounced(event: string, filePath: string): void {
+  if (event === "unlink") { announcedAt.delete(filePath); return; }
+  try { announcedAt.set(filePath, statSync(filePath).mtimeMs); } catch { announcedAt.delete(filePath); }
+}
 
 function catchUp(
   config: PublisherConfig,
@@ -349,9 +367,8 @@ function catchUp(
     if (!matchesExtension(name, config.watchExtensions)) return;
     let st;
     try { st = statSync(filePath); } catch { return; }
-    if (st.mtimeMs < cutoff) return;
-    if (caughtUp.get(filePath) === st.mtimeMs) return;
-    caughtUp.set(filePath, st.mtimeMs);
+    if (catchUpVerdict(st.mtimeMs, announcedAt.get(filePath), cutoff) === "skip") return;
+    announcedAt.set(filePath, st.mtimeMs);
     announced++;
     handleEvent("add", filePath, { size: st.size, mtimeMs: st.mtimeMs }, "catchup");
   };
@@ -375,7 +392,7 @@ function catchUp(
   }
   // Forget what has aged out of the window, so this cannot grow without bound
   // on a long-running process.
-  for (const [seen, at] of caughtUp) if (at < cutoff) caughtUp.delete(seen);
+  for (const [seen, at] of announcedAt) if (at < cutoff) announcedAt.delete(seen);
   if (announced) {
     log(LABEL, `catch-up (${reason}): re-announced ${announced} file(s) `
       + `modified in the last ${config.catchUpWindowSeconds}s`);
@@ -476,6 +493,9 @@ async function main(): Promise<void> {
     };
     log(LABEL, `${event}: ${filePath}`);
     client.publish(config.mqttTopic, JSON.stringify(payload), { qos: 1 });
+    // The reconcile's whole job is announcing what the live path missed. Told
+    // here, it stops re-announcing what the live path *made*.
+    rememberAnnounced(event, filePath);
   }
 
   // add-only mode: track files that have just appeared but haven't proven stable yet.
