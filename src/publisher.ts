@@ -210,6 +210,12 @@ function globToBasenameRegex(glob: string): RegExp {
 /// every way a file lands here -- cp, scp, mv either way, rsync, Resilio --
 /// which is measured in docs/file-arrival-detection.md.
 ///
+/// CREATE is watched for one reason: to tell a *new* file from a *rewritten*
+/// one. CLOSE_WRITE alone cannot -- the kernel reports the same event for both
+/// -- so every in-place tag edit was announced as `add`, and consumers routing
+/// on the event type lost the distinction silently. The rule is just whether
+/// this path's CLOSE_WRITE was preceded by a CREATE.
+///
 /// Directories are watched, never files: a watch on a file follows the inode,
 /// and a rename-into-place replaces it, leaving a watch on nothing.
 function startInotify(
@@ -228,10 +234,17 @@ function startInotify(
   const spawnWatcher = (): void => {
     const child = spawn("inotifywait", [
       "-m", "-q", "-r",
-      "-e", "close_write", "-e", "moved_to", "-e", "delete", "-e", "moved_from",
+      "-e", "close_write", "-e", "create", "-e", "moved_to", "-e", "delete", "-e", "moved_from",
       "--format", "%e|%w%f",
       ...dirs,
     ], { stdio: ["ignore", "pipe", "pipe"] });
+
+    // Paths seen as CREATE and not yet closed. Timestamped so a writer that
+    // creates a file and dies without closing it cannot pin an entry here
+    // forever; anything older than the window is treated as a rewrite, which
+    // is the safer of the two wrong answers.
+    const created = new Map<string, number>();
+    const CREATE_WINDOW_MS = 10 * 60 * 1000;
 
     let buffered = "";
     child.stdout.on("data", (chunk: Buffer) => {
@@ -253,8 +266,39 @@ function startInotify(
         if (base.startsWith(".")) continue;
         if (ignoreRegexes.some((r) => r.test(base))) continue;
 
-        const gone = events.includes("DELETE") || events.includes("MOVED_FROM");
-        handleEvent(gone ? "unlink" : "add", filePath);
+        // Directories are watched, not reported. CREATE makes them visible
+        // here for the first time, and a new genre folder is not a file
+        // arriving.
+        if (events.includes("ISDIR")) continue;
+
+        if (events.includes("DELETE") || events.includes("MOVED_FROM")) {
+          created.delete(filePath);
+          handleEvent("unlink", filePath);
+          continue;
+        }
+
+        if (events.includes("CREATE")) {
+          // Not an announcement of its own: the file exists, but nothing has
+          // finished writing to it yet. Its CLOSE_WRITE is the arrival.
+          const now = Date.now();
+          for (const [seen, at] of created) {
+            if (now - at > CREATE_WINDOW_MS) created.delete(seen);
+          }
+          created.set(filePath, now);
+          continue;
+        }
+
+        if (events.includes("CLOSE_WRITE")) {
+          const fresh = created.delete(filePath);
+          handleEvent(fresh ? "add" : "change", filePath);
+          continue;
+        }
+
+        // MOVED_TO: complete under its final name. Whether it replaced
+        // something is not knowable from here -- the kernel reports the same
+        // event either way -- so it stays an arrival, and a consumer that
+        // cares can ask its own store whether it already had the file.
+        handleEvent("add", filePath);
       }
     });
     child.stderr.on("data", (c: Buffer) => logError(LABEL, `inotifywait: ${c.toString().trim()}`));
@@ -267,7 +311,7 @@ function startInotify(
   };
 
   spawnWatcher();
-  log(LABEL, `inotify watching ${dirs.length} folder(s) for close_write, moved_to`);
+  log(LABEL, `inotify watching ${dirs.length} folder(s) for close_write, create, moved_to`);
 }
 
 /// Re-announce whatever is still sitting in a folder that should drain.
