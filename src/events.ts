@@ -70,3 +70,35 @@ export type PendingOrigin = "live" | "catchup";
 export function unlinkWhilePending(origin: PendingOrigin): "publish" | "drop" {
   return origin === "catchup" ? "publish" : "drop";
 }
+
+/// Whether the periodic reconcile should announce a file it found on disk.
+///
+/// The sweep exists because a dropped inotify event is *silent* -- the kernel
+/// queue overflows and nothing says so, on stderr or anywhere else. Measured:
+/// 1599 of 1600 lost, with no output at all. So every file modified recently is
+/// walked and compared against what has already been announced.
+///
+/// `announcedMtimeMs` is what the *whole publisher* has announced for this path,
+/// not just what the sweep has. That distinction is the point: it used to record
+/// only the sweep's own announcements, so a file the live inotify path had
+/// already published was still news to the sweep, and every published track got
+/// a second announcement minutes later -- a whole downstream run for a file
+/// nothing had touched.
+///
+/// The safety net survives the change intact, and this is the property to hold
+/// on to: if the event was dropped, nothing published, so nothing recorded, so
+/// this returns "announce". The sweep only stops repeating work the fast path
+/// already did.
+export function catchUpVerdict(
+  mtimeMs: number,
+  announcedMtimeMs: number | undefined,
+  cutoffMs: number,
+): "announce" | "skip" {
+  // Older than the window. Its announcement, if it ever needed one, was several
+  // sweeps ago.
+  if (mtimeMs < cutoffMs) return "skip";
+  // Keyed on the mtime, not merely on the path: a file announced and *then*
+  // modified is genuinely news again, and a path-only memory would swallow it.
+  if (announcedMtimeMs === mtimeMs) return "skip";
+  return "announce";
+}
