@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { stat } from "node:fs/promises";
 import path from "node:path";
+import { classifyInotify, unlinkWhilePending, type PendingOrigin } from "./events.js";
 import { spawn } from "node:child_process";
 import { statSync, readdirSync } from "node:fs";
 import { watch, type FSWatcher } from "chokidar";
@@ -250,10 +251,8 @@ function startInotify(
       ...dirs,
     ], { stdio: ["ignore", "pipe", "pipe"] });
 
-    // Paths seen as CREATE and not yet closed. Timestamped so a writer that
-    // creates a file and dies without closing it cannot pin an entry here
-    // forever; anything older than the window is treated as a rewrite, which
-    // is the safer of the two wrong answers.
+    // Paths seen as CREATE and not yet closed -- read and pruned by
+    // classifyInotify, which owns the rule and is tested on it.
     const created = new Map<string, number>();
     const CREATE_WINDOW_MS = 10 * 60 * 1000;
 
@@ -277,39 +276,10 @@ function startInotify(
         if (base.startsWith(".")) continue;
         if (ignoreRegexes.some((r) => r.test(base))) continue;
 
-        // Directories are watched, not reported. CREATE makes them visible
-        // here for the first time, and a new genre folder is not a file
-        // arriving.
-        if (events.includes("ISDIR")) continue;
-
-        if (events.includes("DELETE") || events.includes("MOVED_FROM")) {
-          created.delete(filePath);
-          handleEvent("unlink", filePath);
-          continue;
-        }
-
-        if (events.includes("CREATE")) {
-          // Not an announcement of its own: the file exists, but nothing has
-          // finished writing to it yet. Its CLOSE_WRITE is the arrival.
-          const now = Date.now();
-          for (const [seen, at] of created) {
-            if (now - at > CREATE_WINDOW_MS) created.delete(seen);
-          }
-          created.set(filePath, now);
-          continue;
-        }
-
-        if (events.includes("CLOSE_WRITE")) {
-          const fresh = created.delete(filePath);
-          handleEvent(fresh ? "add" : "change", filePath);
-          continue;
-        }
-
-        // MOVED_TO: complete under its final name. Whether it replaced
-        // something is not knowable from here -- the kernel reports the same
-        // event either way -- so it stays an arrival, and a consumer that
-        // cares can ask its own store whether it already had the file.
-        handleEvent("add", filePath);
+        // What the line means is decided in events.ts, where it is unit
+        // tested. Both rules it encodes were bugs first.
+        const kind = classifyInotify(events, filePath, created, Date.now(), CREATE_WINDOW_MS);
+        if (kind) handleEvent(kind, filePath);
       }
     });
     // No overflow branch here, deliberately. Measured 2026-08-25: with the
@@ -366,7 +336,8 @@ const caughtUp = new Map<string, number>();
 
 function catchUp(
   config: PublisherConfig,
-  handleEvent: (event: string, filePath: string, stats?: { size?: number; mtimeMs?: number }) => void,
+  handleEvent: (event: string, filePath: string, stats?: { size?: number; mtimeMs?: number },
+                origin?: PendingOrigin) => void,
   reason: string,
 ): number {
   if (config.catchUpWindowSeconds <= 0) return 0;
@@ -382,7 +353,7 @@ function catchUp(
     if (caughtUp.get(filePath) === st.mtimeMs) return;
     caughtUp.set(filePath, st.mtimeMs);
     announced++;
-    handleEvent("add", filePath, { size: st.size, mtimeMs: st.mtimeMs });
+    handleEvent("add", filePath, { size: st.size, mtimeMs: st.mtimeMs }, "catchup");
   };
 
   const walk = (dir: string): void => {
@@ -509,7 +480,7 @@ async function main(): Promise<void> {
 
   // add-only mode: track files that have just appeared but haven't proven stable yet.
   // Change events during this window are suppressed (it's still the same write).
-  const pendingAdds = new Map<string, { size: number; mtimeMs: number }>();
+  const pendingAdds = new Map<string, { size: number; mtimeMs: number; origin: PendingOrigin }>();
 
   async function verifyStability(filePath: string): Promise<void> {
     const prev = pendingAdds.get(filePath);
@@ -526,11 +497,16 @@ async function main(): Promise<void> {
       publish("add", filePath);
       return;
     }
-    pendingAdds.set(filePath, { size: current.size, mtimeMs: current.mtimeMs });
+    pendingAdds.set(filePath, { size: current.size, mtimeMs: current.mtimeMs, origin: prev.origin });
     setTimeout(() => { void verifyStability(filePath); }, config.stabilityThresholdSeconds * 1000);
   }
 
-  function handleEvent(event: string, filePath: string, stats?: { size?: number; mtimeMs?: number }): void {
+  function handleEvent(
+    event: string,
+    filePath: string,
+    stats?: { size?: number; mtimeMs?: number },
+    origin: PendingOrigin = "live",
+  ): void {
     if (!explicitFiles.has(filePath) && !matchesExtension(filePath, config.watchExtensions)) return;
 
     if (config.stabilityMode === "add-only") {
@@ -541,7 +517,7 @@ async function main(): Promise<void> {
           publish(event, filePath);
           return;
         }
-        pendingAdds.set(filePath, { size: stats.size, mtimeMs: stats.mtimeMs });
+        pendingAdds.set(filePath, { size: stats.size, mtimeMs: stats.mtimeMs, origin });
         setTimeout(() => { void verifyStability(filePath); }, config.stabilityThresholdSeconds * 1000);
         return;
       }
@@ -549,9 +525,16 @@ async function main(): Promise<void> {
         // Still in the initial write window — suppress; verifyStability will publish the add.
         return;
       }
-      if (event === "unlink" && pendingAdds.has(filePath)) {
-        // File vanished before stability — drop the pending add silently.
+      const pending = pendingAdds.get(filePath);
+      if (event === "unlink" && pending) {
+        // Whether this removal is news depends on whether anything downstream
+        // has heard of the file -- see unlinkWhilePending, which is where that
+        // rule is tested. A live add nobody published is not news; a catch-up
+        // re-announcement of a file that has been in the library all along
+        // very much is, and dropping it leaves an orphan.
         pendingAdds.delete(filePath);
+        if (unlinkWhilePending(pending.origin) === "drop") return;
+        publish(event, filePath);
         return;
       }
     }
