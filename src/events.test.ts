@@ -146,6 +146,16 @@ describe("whether a CLOSE_WRITE is worth calling a change", () => {
   });
 });
 
+describe("ATTRIB — only the timestamps or permissions moved", () => {
+  it("is a change, which changeIsReal then has to prove", () => {
+    expect(classifyInotify("ATTRIB", "/rb/master.db", new Map(), 0, WINDOW)).toBe("change");
+  });
+
+  it("is nothing for a directory", () => {
+    expect(classifyInotify("ATTRIB,ISDIR", "/rb", new Map(), 0, WINDOW)).toBeNull();
+  });
+});
+
 describe("a kernel event for a file already waiting on its stability check", () => {
   it("publishes it now — CLOSE_WRITE and MOVED_TO say the write finished", () => {
     expect(kernelSettlesPending("add", true)).toBe(true);

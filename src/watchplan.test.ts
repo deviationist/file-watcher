@@ -148,6 +148,15 @@ describe("route — what one inotifywait line means for the plan", () => {
     }
   });
 
+  it("passes master.db's timestamp being set — what rbnudge does, with no new bytes", () => {
+    expect(route(plan, flat, "ATTRIB", `${RB}/master.db`)).toEqual({ pass: true, replan: false });
+  });
+
+  it("drops ATTRIB for anything else in the folder, and from a library watch", () => {
+    expect(route(plan, flat, "ATTRIB", `${RB}/master.db-shm`).pass).toBe(false);
+    expect(route(plan, rec, "ATTRIB", "/mnt/music/main/House/a.aiff").pass).toBe(false);
+  });
+
   it("drops everything else in the rekordbox folder", () => {
     for (const name of ["master.db-shm", "networkAnalyze6.db", "master.backup.20261017.db",
                         "master.db.!sync", "automixPlaylist6.xml"]) {

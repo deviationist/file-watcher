@@ -50,6 +50,12 @@ export function classifyInotify(
     return created.delete(filePath) ? "add" : "change";
   }
 
+  // Only the timestamps or permissions moved -- `touch`, or Resilio applying
+  // a peer's mtime without new bytes (which is all `rbnudge` does). Only named
+  // files subscribe to it; whether anything really changed is changeIsReal's
+  // call, against the mtime and size last announced.
+  if (events.includes("ATTRIB")) return "change";
+
   // MOVED_TO, and anything else that means the file is complete under this
   // name. Whether it replaced an existing file is not knowable from the kernel,
   // so it is an arrival and the consumer settles it against its own store.

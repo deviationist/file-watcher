@@ -185,6 +185,11 @@ export function route(plan: Plan, origin: Origin, events: string, filePath: stri
   }
 
   const replan = plan.triggers.has(p);
+  // ATTRIB is only subscribed to on flat watches, for named files. Should one
+  // ever arrive from a recursive watch, it is not for the library.
+  if (events.includes("ATTRIB")) {
+    return { pass: plan.files.has(p) && origin.kind === "flat", replan: false };
+  }
   if (origin.kind === "recursive") return { pass: true, replan };
 
   // A flat watch exists for particular names; everything else in that
