@@ -1,0 +1,27 @@
+name: test
+
+# The publisher sits under every downstream reaction in the homelab -- Plex
+# refreshes, OneTagger, rekordbox2plex -- and its failures are silent: a path
+# it stops watching produces no error, only an absence. So every push runs the
+# whole suite, including the tests against a real inotifywait and the
+# end-to-end chain through a real broker.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      # Without it the inotify and end-to-end suites skip themselves, and a
+      # green run would mean nothing about the part that broke last time.
+      - run: sudo apt-get update && sudo apt-get install -y inotify-tools
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test

@@ -2,7 +2,9 @@ import "dotenv/config";
 import { exec } from "node:child_process";
 import { program } from "commander";
 import mqtt, { type MqttClient } from "mqtt";
-import { configureFileLogger, log, logError, parseCommaSeparated, type MqttChangePayload } from "./shared.js";
+import { commandEnv, Debouncer, matchesPrefix, parseMessage, summarise } from "./batch.js";
+import { loadSubscriberConfig, type SubscriberOpts } from "./config.js";
+import { configureFileLogger, log, logError, parseCommaSeparated } from "./shared.js";
 
 const LABEL = "subscriber";
 
@@ -23,94 +25,17 @@ program
   .option("--log-file <path>", "also append logs to this file (parent dir auto-created)")
   .parse();
 
-const opts = program.opts<{
-  mqttBrokerUrl?: string;
-  mqttTopic?: string;
-  pathPrefixes: string[];
-  debounceSeconds?: number;
-  onChangeCommand?: string;
-  mqttUsername?: string;
-  mqttPassword?: string;
-  logFile?: string;
-}>();
-
-// ---------------------------------------------------------------------------
-// Config — CLI args override env vars
-// ---------------------------------------------------------------------------
-
-interface SubscriberConfig {
-  mqttBrokerUrl: string;
-  mqttTopic: string;
-  pathPrefixes: string[];
-  debounceSeconds: number;
-  onChangeCommand: string;
-  mqttUsername?: string;
-  mqttPassword?: string;
-  logFile?: string;
-}
-
-function loadConfig(): SubscriberConfig {
-  const mqttBrokerUrl = opts.mqttBrokerUrl
-    ?? process.env["MQTT_BROKER_URL"]?.trim()
-    ?? "";
-
-  const onChangeCommand = opts.onChangeCommand
-    ?? process.env["ON_CHANGE_COMMAND"]?.trim()
-    ?? "";
-
-  if (!mqttBrokerUrl) {
-    logError(LABEL, "MQTT_BROKER_URL is required — pass --mqtt-broker-url or set MQTT_BROKER_URL in env");
-    process.exit(1);
-  }
-
-  if (!onChangeCommand) {
-    logError(LABEL, "ON_CHANGE_COMMAND is required — pass --on-change-command or set ON_CHANGE_COMMAND in env");
-    process.exit(1);
-  }
-
-  const mqttTopic = opts.mqttTopic
-    ?? process.env["MQTT_TOPIC"]?.trim()
-    ?? "file-watcher/change";
-
-  const pathPrefixes = opts.pathPrefixes.length > 0
-    ? opts.pathPrefixes
-    : (process.env["PATH_PREFIXES"] ?? "").split(",").map((p) => p.trim()).filter(Boolean);
-
-  const debounceSeconds = opts.debounceSeconds
-    ?? Number(process.env["DEBOUNCE_SECONDS"] ?? "30");
-
-  const mqttUsername = opts.mqttUsername ?? process.env["MQTT_USERNAME"]?.trim() ?? undefined;
-  const mqttPassword = opts.mqttPassword ?? process.env["MQTT_PASSWORD"] ?? undefined;
-
-  const logFile = opts.logFile ?? process.env["LOG_FILE"]?.trim() ?? undefined;
-
-  return {
-    mqttBrokerUrl,
-    mqttTopic,
-    pathPrefixes,
-    debounceSeconds,
-    onChangeCommand,
-    mqttUsername,
-    mqttPassword,
-    logFile,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Path matching
-// ---------------------------------------------------------------------------
-
-function matchesPrefix(filePath: string, prefixes: string[]): boolean {
-  if (prefixes.length === 0) return true;
-  return prefixes.some((prefix) => filePath.startsWith(prefix));
-}
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  const config = loadConfig();
+  const loaded = loadSubscriberConfig(program.opts<SubscriberOpts>(), process.env);
+  if (!loaded.ok) {
+    logError(LABEL, loaded.error);
+    process.exit(1);
+  }
+  const config = loaded.config;
   configureFileLogger(config.logFile, LABEL);
 
   log(LABEL, "Starting with config:");
@@ -122,44 +47,20 @@ async function main(): Promise<void> {
   log(LABEL, `  MQTT_USERNAME:     ${config.mqttUsername ?? "(none)"}`);
   log(LABEL, `  LOG_FILE:          ${config.logFile ?? "(disabled)"}`);
 
-  // Debounce state
-  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  let pendingEvents: MqttChangePayload[] = [];
-  let changedPaths: Set<string> = new Set();
-
-  function scheduleCommand(): void {
-    if (debounceTimer !== null) {
-      clearTimeout(debounceTimer);
-    }
-
-    debounceTimer = setTimeout(() => {
-      debounceTimer = null;
-      const events = pendingEvents;
-      const paths = changedPaths;
-      pendingEvents = [];
-      changedPaths = new Set();
-      const pathsList = [...paths].join("\n");
-      const eventsJson = JSON.stringify(events);
-      const byType = events.reduce<Record<string, number>>((acc, e) => {
-        acc[e.event] = (acc[e.event] ?? 0) + 1;
-        return acc;
-      }, {});
-      const summary = Object.entries(byType).map(([k, v]) => `${v} ${k}`).join(", ");
-      log(LABEL, `Debounce expired: ${events.length} event(s) across ${paths.size} path(s) (${summary}) — executing command`);
-      log(LABEL, `Changed paths:\n${pathsList}`);
-      exec(config.onChangeCommand, {
-        env: { ...process.env, CHANGED_PATHS: pathsList, CHANGED_EVENTS: eventsJson },
-      }, (error, stdout, stderr) => {
-        if (error) {
-          logError(LABEL, `Command failed (exit ${error.code}): ${error.message}`);
-          if (stderr) logError(LABEL, `stderr: ${stderr.trim()}`);
-        } else {
-          if (stdout.trim()) log(LABEL, `Command stdout: ${stdout.trim()}`);
-          log(LABEL, "Command completed successfully");
-        }
-      });
-    }, config.debounceSeconds * 1000);
-  }
+  const debouncer = new Debouncer(config.debounceSeconds * 1000, (batch) => {
+    log(LABEL, `Debounce expired: ${batch.events.length} event(s) across ${batch.paths.length} path(s) `
+      + `(${summarise(batch)}) — executing command`);
+    log(LABEL, `Changed paths:\n${batch.paths.join("\n")}`);
+    exec(config.onChangeCommand, { env: { ...process.env, ...commandEnv(batch) } }, (error, stdout, stderr) => {
+      if (error) {
+        logError(LABEL, `Command failed (exit ${error.code}): ${error.message}`);
+        if (stderr) logError(LABEL, `stderr: ${stderr.trim()}`);
+      } else {
+        if (stdout.trim()) log(LABEL, `Command stdout: ${stdout.trim()}`);
+        log(LABEL, "Command completed successfully");
+      }
+    });
+  });
 
   // Connect to MQTT broker (auto-reconnects every reconnectPeriod ms on failure)
   const client: MqttClient = await mqtt.connectAsync(config.mqttBrokerUrl, {
@@ -194,36 +95,23 @@ async function main(): Promise<void> {
     }
   });
 
-  // Handle incoming messages
   client.on("message", (_topic, payload) => {
-    let parsed: MqttChangePayload;
-    try {
-      parsed = JSON.parse(payload.toString()) as MqttChangePayload;
-    } catch {
-      logError(LABEL, `Malformed message, skipping: ${payload.toString().slice(0, 200)}`);
+    const parsed = parseMessage(payload.toString());
+    if (!parsed.ok) {
+      logError(LABEL, parsed.error);
       return;
     }
-
-    if (!parsed.path || !parsed.event) {
-      logError(LABEL, `Message missing required fields, skipping`);
-      return;
-    }
-
-    if (!matchesPrefix(parsed.path, config.pathPrefixes)) return;
-
-    pendingEvents.push(parsed);
-    changedPaths.add(parsed.path);
-    log(LABEL, `${parsed.event}: ${parsed.path} (${pendingEvents.length} pending, debounce reset)`);
-    scheduleCommand();
+    if (!matchesPrefix(parsed.payload.path, config.pathPrefixes)) return;
+    const pending = debouncer.add(parsed.payload);
+    log(LABEL, `${parsed.payload.event}: ${parsed.payload.path} (${pending} pending, debounce reset)`);
   });
 
-  // Graceful shutdown
   function shutdown(signal: string): void {
     log(LABEL, `Received ${signal} — shutting down`);
-    if (debounceTimer !== null) {
-      clearTimeout(debounceTimer);
-      debounceTimer = null;
-      log(LABEL, `Cleared pending debounce timer (${pendingEvents.length} event(s), ${changedPaths.size} path(s) will NOT trigger command)`);
+    const dropped = debouncer.cancel();
+    if (dropped.events > 0) {
+      log(LABEL, `Cleared pending debounce timer (${dropped.events} event(s), ${dropped.paths} path(s) `
+        + "will NOT trigger command)");
     }
     client.end(true, () => {
       log(LABEL, "MQTT client disconnected — exiting");

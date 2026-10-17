@@ -71,6 +71,22 @@ export function unlinkWhilePending(origin: PendingOrigin): "publish" | "drop" {
   return origin === "catchup" ? "publish" : "drop";
 }
 
+/// Whether a kernel event ends the stability wait of a file already waiting.
+///
+/// The wait exists to infer that a write has finished. CLOSE_WRITE and MOVED_TO
+/// *say* it has, so a file waiting when one arrives is published then and
+/// there. Without this, the arrival was dropped as "already pending" and the
+/// file went out a full STABILITY_THRESHOLD later -- which is what happened to
+/// any file that landed just as a catch-up ran: the catch-up saw it first,
+/// parked it for 60 s, and the kernel's own word on it was thrown away. Found
+/// by the end-to-end suite, as a test that failed one run in eight.
+///
+/// Removals are not covered: whether a removal of a waiting file is news is
+/// `unlinkWhilePending`'s question.
+export function kernelSettlesPending(event: string, pending: boolean): boolean {
+  return pending && (event === "add" || event === "change");
+}
+
 /// Whether the periodic reconcile should announce a file it found on disk.
 ///
 /// The sweep exists because a dropped inotify event is *silent* -- the kernel

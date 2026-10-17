@@ -1,6 +1,9 @@
 node_modules/
 dist/
-.env
+# Every .env and every copy of one -- a backup committed in 32b014c carried
+# the live broker password into a public repository.
+.env*
+!.env.example
 .claude/
 systemd/*.service
 scripts/plex-refresh.ts
