@@ -150,6 +150,15 @@ describe.skipIf(!hasInotifywait)("publisher → broker → subscriber → comman
     expect(runs().map(rel)).toEqual([["add rb/master.db"]]);
   });
 
+  it("runs it when only master.db's mtime is bumped — what rbnudge does", async () => {
+    await rekordboxSubscriber();
+    await publisher();
+    const now = new Date();
+    utimesSync(p("rb/master.db"), now, now);
+    await waitFor(() => runs().length === 1, 5000, "the command to run");
+    expect(runs().map(rel)).toEqual([["change rb/master.db"]]);
+  });
+
   it("runs it for a WAL that appears while Rekordbox is open", async () => {
     await rekordboxSubscriber();
     await publisher();

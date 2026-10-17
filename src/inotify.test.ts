@@ -7,7 +7,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { InotifySource } from "./inotify.js";
@@ -96,6 +96,25 @@ describe.skipIf(!hasInotifywait)("a named file — the master.db case", () => {
     await waitFor(() => events.length === 1);
     writeFileSync(p("rb/master.db"), "v3");
     await waitFor(() => has("change rb/master.db"));
+  });
+
+  it("reports master.db's mtime being set without a write — how rbnudge arrives from Resilio", async () => {
+    await start(["rb/master.db"]);
+    const later = new Date(Date.now() + 60_000);
+    utimesSync(p("rb/master.db"), later, later);
+    await waitFor(() => has("change rb/master.db"), 3000, "the ATTRIB change");
+  });
+
+  it("does not report a library file's timestamp being touched", async () => {
+    mkdirSync(p("lib"));
+    write("lib/a.aiff");
+    await start(["lib", "rb/master.db"]);
+    const later = new Date(Date.now() + 60_000);
+    utimesSync(p("lib/a.aiff"), later, later);
+    writeFileSync(p("rb/master.db"), "marker");
+    await waitFor(() => has("change rb/master.db"));
+    await settle();
+    expect(events).toEqual(["change rb/master.db"]);
   });
 
   it("says nothing about the other files in the folder", async () => {

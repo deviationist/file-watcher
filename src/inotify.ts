@@ -198,6 +198,13 @@ export class InotifySource {
     const target = origin.kind === "recursive" ? origin.root : origin.dir;
     const args = ["-m", ...(origin.kind === "recursive" ? ["-r"] : [])];
     for (const e of EVENTS) args.push("-e", e);
+    // ATTRIB on flat watches only, which exist for named files. A timestamp
+    // set without new bytes raises nothing else: measured 2026-10-17, an
+    // rbnudge reached xavi as Resilio's OnNotifyAttrChange on the same inode,
+    // and the publisher said nothing -- where the polling watcher, comparing
+    // mtimes, had always seen it. On a recursive library watch it would be a
+    // stream of permission and timestamp noise for no reader.
+    if (origin.kind === "flat") args.push("-e", "attrib");
     // Not -q: "Watches established." on stderr is how we know the watch is
     // live, and a caller waiting on start() is waiting on exactly that.
     args.push("--format", "%e|%w%f", target);
