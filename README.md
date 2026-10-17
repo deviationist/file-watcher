@@ -1,9 +1,9 @@
 # file-watcher
 
-Generic filesystem change notifier built on MQTT pub/sub. A **publisher** watches one or more folders and emits change events to an MQTT broker. One or more independent **subscribers** filter, debounce, and run a shell command in response. Designed for CIFS/NAS mounts where inotify doesn't work.
+Generic filesystem change notifier built on MQTT pub/sub. A **publisher** watches folders and files and emits change events to an MQTT broker. One or more independent **subscribers** filter, debounce, and run a shell command in response. Reads events from the kernel (inotify) on local filesystems, or polls (chokidar) on CIFS/NAS mounts where inotify doesn't work.
 
 ```
-chokidar (polling) → publisher → MQTT broker (Mosquitto)
+inotify | chokidar (polling) → publisher → MQTT broker (Mosquitto)
                                        │
                           ┌─────────────┼─────────────┐
                           ▼             ▼             ▼
@@ -42,7 +42,9 @@ npm run start:subscriber   # in another
 | `npm run build` | Compile TypeScript to `dist/` |
 | `npm run start:publisher` | Run compiled publisher |
 | `npm run start:subscriber` | Run compiled subscriber |
-| `npm test` | Run vitest test suite once |
+| `npm test` | Run the whole suite once (needs `inotifywait` from inotify-tools, or the inotify and end-to-end suites skip) |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm run check` | Both; `npm run build` runs this first and refuses to build on a failure |
 
 ## Configuration
 
@@ -60,8 +62,9 @@ All settings can be supplied via CLI args or env vars (CLI takes precedence). Se
 
 | Var | Default | Description |
 |---|---|---|
-| `WATCH_FOLDERS` | — (required) | Comma-separated absolute paths to watch |
-| `WATCH_EXTENSIONS` | (all) | Comma-separated extensions without dots (e.g. `mp3,flac`). Paths listed verbatim in `WATCH_FOLDERS` (e.g. a single `master.db`) bypass this filter |
+| `WATCH_PATHS` | — (required) | Comma-separated absolute paths: folders, files, or paths that do not exist yet. See [Watch paths](#watch-paths). `WATCH_FOLDERS` is the old name, still read with a warning |
+| `WATCH_EXTENSIONS` | (all) | Comma-separated extensions without dots (e.g. `mp3,flac`). Files named in `WATCH_PATHS` (e.g. a single `master.db`) bypass this filter |
+| `EVENT_SOURCE` | `chokidar` | `inotify` for local filesystems, `chokidar` (polling) for CIFS/SMB |
 | `WATCH_IGNORE_PATTERNS` | `._*` | Comma-separated basename globs to ignore. Default drops macOS AppleDouble metadata files |
 | `WATCH_EVENTS` | `add,unlink,change` | chokidar events to react to |
 | `USE_POLLING` | `true` | Required for CIFS/SMB mounts |
@@ -82,6 +85,25 @@ All settings can be supplied via CLI args or env vars (CLI takes precedence). Se
 | Var | Default | Description |
 |---|---|---|
 | `LOG_FILE` | (disabled) | If set, every log line is also appended to this file. stdout/stderr still receive the line so journald keeps capturing service output. Parent directory is auto-created. Set per service (use a unit-level `--log-file` flag) so publisher/subscriber don't collide on one file. |
+
+### Watch paths
+
+With `EVENT_SOURCE=inotify`, each path in `WATCH_PATHS` is looked at on startup and whenever something it depends on changes:
+
+| The path is | It is watched by | What passes |
+|---|---|---|
+| a folder | an `inotifywait -r` on it | everything under it, subject to the extension and ignore filters |
+| a file, or missing with its folder present | an `inotifywait` (no `-r`) on its parent folder | only events for that exact name |
+| missing, folder missing too | an `inotifywait` (no `-r`) on the nearest folder that exists | nothing; its appearance redraws the plan |
+
+A file is never watched directly: a watch follows the inode, and a rename-into-place (Resilio, rsync, SQLite) replaces it. A missing path is taken to be a file unless it ends in `/`. A watched folder that is deleted or moved is waited for again, and a path that appears after startup is watched from then on, with a catch-up over anything written to it before its watch was up. The startup log says what each path was taken to be, e.g.
+
+```
+WATCH_PATHS: /mnt/music/main (folder), /mnt/resilio/data/rekordbox/master.db (file), /mnt/resilio/data/rekordbox/master.db-wal (file, not there yet)
+inotify: 1 folder(s) recursively, 2 file(s) via 1 parent folder(s)
+```
+
+Chokidar (polling) takes the paths as given, files included.
 
 ## MQTT message format
 
@@ -140,7 +162,8 @@ Copy each, replace the placeholders (user, working directory, node binary path, 
 
 ## Key design decisions
 
-- **Polling, not inotify.** CIFS mounts don't fire inotify events, so chokidar runs in poll mode by default.
+- **inotify where the filesystem has it, polling where it does not.** CIFS mounts don't fire inotify events, so chokidar in poll mode is the default; local filesystems use `EVENT_SOURCE=inotify`.
+- **A path that is not being watched is an error in the log, not a silence.** The August 2026 switch to inotify kept only folders and dropped `master.db` without a word; nothing downstream of it ran for two months. Each path's fate is now logged at startup and on every change, and the suite tests it at three levels -- the plan, a real `inotifywait`, and the whole chain through a real broker to a real command.
 - **Stability gating defaults to `add-only`.** Only new files wait `STABILITY_THRESHOLD_SECONDS` before firing — slow NAS copies generate one event, not dozens, while in-place edits (e.g. an editor rewriting a tag) fire immediately. Switch to `await-write-finish` if your workflow involves many small writes per change.
 - **Publisher emits immediately, subscribers own their debounce.** Each subscriber chooses how long to coalesce events for its workload.
 - **Resilient to broker restarts.** Both binaries auto-reconnect every 2 s; the subscriber re-subscribes on each reconnect.

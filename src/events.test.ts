@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { catchUpVerdict, changeIsReal, classifyInotify, unlinkWhilePending } from "./events.js";
+import { catchUpVerdict, changeIsReal, classifyInotify, kernelSettlesPending, unlinkWhilePending } from "./events.js";
 
 const WINDOW = 600_000;
 
@@ -143,5 +143,20 @@ describe("whether a CLOSE_WRITE is worth calling a change", () => {
     // ever say about a file, which is the one event nothing downstream can
     // recover from.
     expect(changeIsReal({ mtimeMs: 1_000, size: 500 }, undefined)).toBe(true);
+  });
+});
+
+describe("a kernel event for a file already waiting on its stability check", () => {
+  it("publishes it now — CLOSE_WRITE and MOVED_TO say the write finished", () => {
+    expect(kernelSettlesPending("add", true)).toBe(true);
+    expect(kernelSettlesPending("change", true)).toBe(true);
+  });
+
+  it("leaves a removal to unlinkWhilePending", () => {
+    expect(kernelSettlesPending("unlink", true)).toBe(false);
+  });
+
+  it("has nothing to settle when nothing is waiting", () => {
+    expect(kernelSettlesPending("add", false)).toBe(false);
   });
 });

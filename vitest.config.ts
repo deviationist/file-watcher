@@ -5,5 +5,11 @@ import { defineConfig } from "vitest/config";
 // the same broker topic, and each sees the other's messages. It reads as a real
 // failure -- "expected 3 events, got 5" -- and is not one.
 export default defineConfig({
-  test: { exclude: ["dist/**", "node_modules/**"] },
+  test: {
+    exclude: ["dist/**", "node_modules/**"],
+    // The inotify and end-to-end suites run real inotifywait processes and
+    // real binaries; in parallel files they compete for the same CPU and
+    // their waits become the thing under test. One file at a time.
+    fileParallelism: false,
+  },
 });
