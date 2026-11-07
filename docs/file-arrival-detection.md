@@ -64,6 +64,26 @@ A naive "any CLOSE_WRITE" rule ingests the temp file. Temp names must be
 ignored — dotfiles covers rsync (`.name.XXXXXX`), Resilio (`.!sync`) and our own
 staging convention.
 
+### The exception: a file that is never closed (2026-11-07)
+
+Two NFS writers leave the rule without its `CLOSE_WRITE`, measured on xavi:
+
+| method (from quim) | events on the FINAL name | the close |
+|---|---|---|
+| `cp` between two paths on xavi (NFSv4.2 server-side `COPY`) | `CREATE` + `MODIFY` | **never** (none in 120 s) |
+| `cp` or an edit while quim holds a write delegation | `CREATE` + `MODIFY` | ~97 s later, when the delegation is returned |
+
+The server does the copy itself, so no client ever opens and closes the file.
+Without help, such a file waited for the periodic reconcile (up to 300 s), and
+its path stayed in the `created` map, so the next real edit within 10 minutes
+was announced as `add` instead of `change`.
+
+**The fallback:** a `CREATE` with no close after 10 s is dropped from `created`
+and handed to the pipeline, which publishes it as `add` once its size and mtime
+hold still for `STABILITY_THRESHOLD_SECONDS` (or at once if the late close
+arrives first). A late close after that is a rewrite, and `changeIsReal`
+silences it when nothing changed. Pickup for these files: ~25 s.
+
 ## Finding 3: the threshold, not the polling, was the cost
 
 With `add-only`, `STABILITY_THRESHOLD_SECONDS` dominates. Polling only cost the

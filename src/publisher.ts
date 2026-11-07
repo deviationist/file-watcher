@@ -110,6 +110,7 @@ async function main(): Promise<void> {
       targets,
       ignoreRegexes,
       onEvent: (event, filePath) => pipeline.handleKernelEvent(event, filePath),
+      onUnclosed: (filePath) => pipeline.handleUnclosed(filePath),
       // A path that appeared after startup was unwatched from the moment it was
       // created until its watch was set up. Reconcile just that path.
       onSettled: (state) => { pipeline.catchUp(`${state.path} appeared`, [state.path]); },

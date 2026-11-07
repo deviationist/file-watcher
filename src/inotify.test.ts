@@ -7,7 +7,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, renameSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, openSync, renameSync, rmSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { InotifySource } from "./inotify.js";
@@ -24,6 +24,7 @@ let root: string;
 let source: InotifySource | undefined;
 let events: string[];
 let settled: string[];
+let unclosed: string[];
 let logs: string[];
 let errors: string[];
 
@@ -48,6 +49,8 @@ async function start(paths: string[], extra: { ignore?: string[] } = {}): Promis
     ignoreRegexes: (extra.ignore ?? ["._*"]).map(globToBasenameRegex),
     onEvent: (event, filePath) => events.push(`${event} ${path.relative(root, filePath)}`),
     onSettled: (s) => settled.push(`${s.kind} ${path.relative(root, s.path)}`),
+    onUnclosed: (filePath) => unclosed.push(path.relative(root, filePath)),
+    unclosedAfterMs: 300,
     log: (m) => logs.push(m),
     logError: (m) => errors.push(m),
     recheckMs: 0,
@@ -61,6 +64,7 @@ beforeEach(() => {
   root = mkdtempSync(path.join(tmpdir(), "fw-inotify-"));
   events = [];
   settled = [];
+  unclosed = [];
   logs = [];
   errors = [];
 });
@@ -191,6 +195,66 @@ describe.skipIf(!hasInotifywait)("a folder", () => {
     mkdirSync(p("lib/Empty"));
     await settle();
     expect(events).toEqual([]);
+  });
+});
+
+/// A created file that nothing closes: what an NFSv4.2 server-side copy looks
+/// like on xavi (CREATE, MODIFY, never CLOSE_WRITE), and what a write from a
+/// client holding a write delegation looks like for ~97 s. Stood in for here by
+/// a file descriptor this test keeps open.
+describe.skipIf(!hasInotifywait)("a created file nobody closes", () => {
+  it("is handed on once the wait is over, and nothing is published for it by the kernel", async () => {
+    mkdirSync(p("lib"));
+    await start(["lib"]);
+    const fd = openSync(p("lib/copied.aiff"), "w");
+    try {
+      writeSync(fd, "bytes the server wrote");
+      await waitFor(() => unclosed.includes("lib/copied.aiff"), 2000, "onUnclosed");
+      expect(events).toEqual([]);
+    } finally { closeSync(fd); }
+  });
+
+  it("calls a late close a rewrite, not a second arrival", async () => {
+    mkdirSync(p("lib"));
+    await start(["lib"]);
+    const fd = openSync(p("lib/copied.aiff"), "w");
+    writeSync(fd, "x");
+    await waitFor(() => unclosed.length === 1, 2000, "onUnclosed");
+    closeSync(fd);
+    await waitFor(() => events.length === 1);
+    expect(events).toEqual(["change lib/copied.aiff"]);
+  });
+
+  it("calls the next edit a change — the add-instead-of-change trap", async () => {
+    mkdirSync(p("lib"));
+    await start(["lib"]);
+    const fd = openSync(p("lib/copied.aiff"), "w");
+    writeSync(fd, "x");
+    await waitFor(() => unclosed.length === 1, 2000, "onUnclosed");
+    writeFileSync(p("lib/copied.aiff"), "tagged");      // an edit, fd still open
+    await waitFor(() => events.length === 1);
+    expect(events).toEqual(["change lib/copied.aiff"]);
+    closeSync(fd);
+  });
+
+  it("is not called for a file that was closed in time", async () => {
+    mkdirSync(p("lib"));
+    await start(["lib"]);
+    write("lib/a.aiff");
+    await waitFor(() => has("add lib/a.aiff"));
+    await settle(500);
+    expect(unclosed).toEqual([]);
+  });
+
+  it("is not called for a file removed before the wait is over, nor for a folder", async () => {
+    mkdirSync(p("lib"));
+    await start(["lib"]);
+    const fd = openSync(p("lib/gone.aiff"), "w");
+    unlinkSync(p("lib/gone.aiff"));
+    mkdirSync(p("lib/New Genre"));
+    await settle(500);
+    closeSync(fd);
+    expect(unclosed).toEqual([]);
   });
 });
 

@@ -5,8 +5,9 @@
 /// every way a file lands here -- cp, scp, mv either way, rsync, Resilio --
 /// which is measured in docs/file-arrival-detection.md.
 ///
-/// CREATE is watched for one reason: to tell a *new* file from a *rewritten*
-/// one (see classifyInotify).
+/// CREATE is watched for two reasons: to tell a *new* file from a *rewritten*
+/// one (see classifyInotify), and to notice a new file that is never closed
+/// (see `onUnclosed`).
 ///
 /// What is watched is decided by watchplan.ts. This module only runs it: one
 /// inotifywait per watch, started and stopped as the plan changes, so a path
@@ -50,6 +51,21 @@ export interface InotifyOptions {
   recheckMs?: number;
   /// How long to wait before replacing an inotifywait that exited. Default 5 s.
   restartDelayMs?: number;
+  /// A file was created and nothing has closed it after `unclosedAfterMs`.
+  ///
+  /// Two writers do this, both measured on xavi 2026-11-06/07:
+  ///  - **NFSv4.2 server-side copy.** `cp` on quim between two paths on xavi
+  ///    sends one COPY and nfsd writes the file itself: CREATE, MODIFY, and
+  ///    *no CLOSE_WRITE at all* (none in 120 s).
+  ///  - **A writer holding an NFSv4 write delegation.** Its close reaches xavi
+  ///    only when the delegation is returned, ~97 s later.
+  /// Without this, such a file waited for the reconcile (up to 300 s), and its
+  /// path stayed in `created`, so the next real edit was announced as `add`.
+  /// The path is dropped from `created` before this is called: whatever closes
+  /// it later is a rewrite. The caller decides when the file is complete.
+  onUnclosed?: (filePath: string) => void;
+  /// Default 10 s: a normal write from quim closes in milliseconds.
+  unclosedAfterMs?: number;
 }
 
 interface Child {
@@ -72,6 +88,8 @@ export class InotifySource {
   // classifyInotify. Shared by every watch, because a file can be created
   // under one plan and closed under the next.
   private readonly created = new Map<string, number>();
+  // One timer per path in `created`, for onUnclosed.
+  private readonly unclosed = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly probe: Probe;
   private readonly spawnFn: (cmd: string, args: string[]) => ChildProcessByStdio<null, Readable, Readable>;
   private recheckTimer: ReturnType<typeof setInterval> | null = null;
@@ -116,6 +134,8 @@ export class InotifySource {
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.recheckTimer) clearInterval(this.recheckTimer);
+    for (const t of this.unclosed.values()) clearTimeout(t);
+    this.unclosed.clear();
     await this.replanning;
     await Promise.all([...this.children.values()].map((c) => this.kill(c)));
     this.children.clear();
@@ -291,7 +311,35 @@ export class InotifySource {
 
     // What the line means is decided in events.ts, where it is unit tested.
     const kind = classifyInotify(events, filePath, this.created, Date.now(), CREATE_WINDOW_MS);
-    if (kind) this.opts.onEvent(kind, filePath);
+    if (kind) {
+      this.clearUnclosed(filePath);
+      this.opts.onEvent(kind, filePath);
+    } else if (events.includes("CREATE") && !events.includes("ISDIR")) {
+      this.armUnclosed(filePath);
+    }
+  }
+
+  /// Start the clock on a created file. Its close, removal or rename-away
+  /// stops it (clearUnclosed); a second CREATE before then does not restart
+  /// it, matching classifyInotify keeping the first sighting.
+  private armUnclosed(filePath: string): void {
+    if (!this.opts.onUnclosed || this.unclosed.has(filePath)) return;
+    const t = setTimeout(() => {
+      this.unclosed.delete(filePath);
+      if (this.stopped) return;
+      // Already closed or gone: classifyInotify took it out, nothing to do.
+      if (!this.created.delete(filePath)) return;
+      this.opts.onUnclosed?.(filePath);
+    }, this.opts.unclosedAfterMs ?? 10_000);
+    t.unref?.();
+    this.unclosed.set(filePath, t);
+  }
+
+  private clearUnclosed(filePath: string): void {
+    const t = this.unclosed.get(filePath);
+    if (t === undefined) return;
+    clearTimeout(t);
+    this.unclosed.delete(filePath);
   }
 
   private kill(c: Child): Promise<void> {

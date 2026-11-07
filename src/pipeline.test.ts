@@ -102,6 +102,65 @@ describe("arrivals", () => {
   });
 });
 
+describe("a created file nothing has closed", () => {
+  it("publishes it as an add once it has held still", async () => {
+    const p = make({ stabilityThresholdSeconds: 0.05 });
+    p.handleUnclosed(write("lib/copied.aiff"));
+    expect(sent).toEqual([]);                    // not proven complete yet
+    await waitFor(() => sent.length === 1);
+    expect(sentAs()).toEqual(["add lib/copied.aiff"]);
+  });
+
+  it("waits again while it is still growing", async () => {
+    const p = make({ stabilityThresholdSeconds: 0.05 });
+    const f = write("lib/copied.aiff");
+    p.handleUnclosed(f);
+    writeFileSync(f, "longer than before");
+    utimesSync(f, new Date(), new Date(Date.now() + 5000));
+    await new Promise((r) => setTimeout(r, 70));
+    expect(sent).toEqual([]);
+    await waitFor(() => sent.length === 1);
+    expect(sentAs()).toEqual(["add lib/copied.aiff"]);
+  });
+
+  it("publishes at once if its late close arrives during the wait", () => {
+    const p = make({ stabilityThresholdSeconds: 60 });
+    const f = write("lib/copied.aiff");
+    p.handleUnclosed(f);
+    p.handleKernelEvent("change", f);
+    expect(sentAs()).toEqual(["add lib/copied.aiff"]);
+  });
+
+  it("says nothing more when the late close comes after it was published", async () => {
+    const p = make({ stabilityThresholdSeconds: 0.05 });
+    const f = write("lib/copied.aiff");
+    p.handleUnclosed(f);
+    await waitFor(() => sent.length === 1);
+    p.handleKernelEvent("change", f);           // same bytes, same mtime
+    expect(sentAs()).toEqual(["add lib/copied.aiff"]);
+  });
+
+  it("is not announced again by the reconcile", async () => {
+    const p = make({ stabilityThresholdSeconds: 0.05 });
+    p.handleUnclosed(write("lib/copied.aiff"));
+    await waitFor(() => sent.length === 1);
+    expect(p.catchUp("periodic")).toBe(0);
+  });
+
+  it("waits for stability even in await-write-finish mode", () => {
+    const p = make({ stabilityMode: "await-write-finish", stabilityThresholdSeconds: 60 });
+    p.handleUnclosed(write("lib/copied.aiff"));
+    expect(sent).toEqual([]);
+  });
+
+  it("ignores names the filters drop, and files already gone", () => {
+    const p = make({ stabilityThresholdSeconds: 0.05 });
+    p.handleUnclosed(write("lib/cover.jpg"));
+    p.handleUnclosed(path.join(dir, "lib", "never.aiff"));
+    return new Promise<void>((r) => setTimeout(() => { expect(sent).toEqual([]); r(); }, 120));
+  });
+});
+
 describe("a catch-up and the kernel seeing the same arrival", () => {
   it("publishes at once when the kernel's event comes after the catch-up parked the file", () => {
     // The race the end-to-end suite found: a file lands as the startup

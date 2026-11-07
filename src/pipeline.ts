@@ -36,6 +36,11 @@ export interface Pipeline {
   /// An event read from the kernel: CLOSE_WRITE or MOVED_TO behind it, so the
   /// write is known to be finished. See `kernelSettlesPending`.
   handleKernelEvent(event: string, filePath: string): void;
+  /// A file created a while ago that nothing has closed (see InotifySource's
+  /// `onUnclosed`). Nothing says the write is finished, so it waits like a
+  /// catch-up find: published as `add` once size and mtime hold still for the
+  /// stability threshold, or at once if its CLOSE_WRITE turns up first.
+  handleUnclosed(filePath: string): void;
   /// Announce what changed in the window under `paths` (default: every watch
   /// path). Returns how many files it announced.
   catchUp(reason: string, paths?: string[]): number;
@@ -185,6 +190,19 @@ export function createPipeline(config: PipelineConfig, deps: PipelineDeps): Pipe
     handleEvent(event, filePath);
   }
 
+  function handleUnclosed(filePath: string): void {
+    if (!explicitFiles.has(filePath) && !matchesExtension(filePath, config.watchExtensions)) return;
+    if (pendingAdds.has(filePath)) return;
+    let st;
+    try { st = statSync(filePath); } catch { return; }   // gone again
+    deps.log(`unclosed: ${filePath} — created with no close yet, `
+      + `publishing once it holds still for ${config.stabilityThresholdSeconds}s`);
+    // Always the stability wait, whatever the mode: in await-write-finish mode
+    // handleEvent would publish an add at once, possibly of a partial file.
+    pendingAdds.set(filePath, { size: st.size, mtimeMs: st.mtimeMs, origin: "live" });
+    later(() => { void verifyStability(filePath); }, config.stabilityThresholdSeconds * 1000);
+  }
+
   /// Announce whatever changed while nobody was listening.
   ///
   /// Two gaps this closes, both silent and both the same shape -- an event that
@@ -284,5 +302,5 @@ export function createPipeline(config: PipelineConfig, deps: PipelineDeps): Pipe
     for (const t of intervals) clearInterval(t);
   }
 
-  return { handleEvent, handleKernelEvent, catchUp, startTimers, stop };
+  return { handleEvent, handleKernelEvent, handleUnclosed, catchUp, startTimers, stop };
 }
